@@ -1,0 +1,123 @@
+/**:
+  ros__parameters:
+    # false：MID360 + IMU 普通建图；true：先验地图定位。
+    # 建图与重定位共用模式和地图路径；本次重力对齐由 uav.gravity_align_en 控制。
+    locate_in_prior_map: true
+    # 普通建图允许留空；定位模式需填写已有 PCD 的绝对路径，另行启动外部重定位节点。
+    # 重定位入口读取此处同一个路径；launch 不检查或转换地图路径。
+    prior_map_path: "/home/fire/Desktop/FAST_LIVO2_ROS2_relocation_ultra/PCD/map_1102_2327.pcd"
+
+    time_check:
+      # 启动时只读校验系统时钟同步状态；失败立即退出，不进入建图。
+      # 关闭后仍可建图，但日期未经校验；不会自动联网校时或修改系统时间。
+      enabled: true
+
+    # 参数参考 A 工程 livo.yaml + mid360.yaml，适配 B 工程当前的参数接口。
+    common:
+      img_topic: "/camera/camera/color/image_raw"
+      lid_topic: "/livox/lidar"
+      imu_topic: "/livox/imu"
+      img_en: 0
+      lidar_en: 1
+      ros_driver_bug_fix: false
+
+    extrin_calib:
+      # 与 A 相同：p_imu = extrinsic_R * p_lidar + extrinsic_T，平移单位为米。
+      extrinsic_T: [-0.011, -0.02329, 0.04412]
+      extrinsic_R: [1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0]
+      # A 的 T_cl 拆成 B 支持的 Rcl/Pcl：p_camera = Rcl * p_lidar + Pcl。
+      # 当前 img_en=0，这组相机外参不参与实时视觉融合。
+      Rcl: [-0.000855966483645, -0.999828172768721, -0.018517350224543,
+             0.598269757782753,  0.014325846918316, -0.801166691165228,
+             0.801294305635542, -0.011764142469066,  0.598154696301903]
+      Pcl: [0.031768816365067, -0.108594539194672, 0.016584619676391]
+
+    time_offset:
+      # B 尚未读取 imu_time_offset；当前值与其代码默认值均为 0。
+      imu_time_offset: 0.0
+      # 沿用 A 的记录值；当前关闭视觉，启用视觉前需重新验证。
+      img_time_offset: 0.1
+      exposure_time_init: 0.0
+
+    preprocess:
+      lidar_type: 1                  # Livox CustomMsg 处理分支，适用于当前 MID360 驱动。
+      scan_line: 4
+      scan_rate: 10
+      blind: 0.6
+      point_filter_num: 3
+      filter_size_surf: 0.1
+      filter_size_map: 0.1            # 仅定位模式加载先验地图时使用。
+      feature_extract_enabled: false
+
+    vio:
+      max_iterations: 5
+      # A 的值均为 1000.0；B 当前要求整数参数，数值保持一致。
+      outlier_threshold: 1000
+      img_point_cov: 1000
+      patch_size: 8
+      patch_pyrimid_level: 4
+      grid_size: 5
+      grid_n_height: 17
+      normal_en: true
+      raycast_en: false
+      inverse_composition_en: false
+      exposure_estimate_en: true
+      inv_expo_cov: 0.1
+
+    imu:
+      imu_en: true
+      gravity_est_en: true
+      ba_bg_est_en: true
+      imu_int_frame: 30
+      acc_cov: 0.1
+      gyr_cov: 0.1
+      # B 当前固定使用 0.0001，并未读取以下两项；与 A 本次参考值相同。
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+
+    lio:
+      # LIO 最大迭代次数；收敛时可以提前结束，与 A 使用相同参数名。
+      max_iterations: 5
+      dept_err: 0.02
+      beam_err: 0.05
+      min_eigen_value: 0.0025
+      sigma_num: 3.0
+      voxel_size: 0.5
+      max_layer: 2
+      max_points_num: 50
+      layer_init_num: [5, 5, 5, 5, 5]
+
+    local_map:
+      map_sliding_en: false
+      half_map_size: 100
+      sliding_thresh: 8.0
+
+    uav:
+      imu_rate_odom: false
+      # 根据本次 IMU 初始化结果对齐重力；保持静止直到先验体素地图初始化完成。
+      gravity_align_en: true
+
+    publish:
+      dense_map_en: true
+      pub_effect_point_en: false
+      pub_plane_en: true
+      pub_scan_num: 1
+      blind_rgb_points: 0.0
+      map_frame_id: "map"
+
+    evo:
+      seq_name: "Mid360_D405_Mapping_01"
+      pose_output_en: false
+
+    pcd_save:
+      # interval=-1 时正常退出后写盘；目录必须是绝对路径，程序会自动创建。
+      # 启动时固定 map_MMDD_HHMM 前缀；正数间隔分段追加 _0001 等序号。
+      pcd_save_en: true
+      # 定位模式需总开关和本开关同时开启才保存；普通建图不受本项影响。
+      save_in_localization: true
+      output_dir: "/home/fire/Desktop/FAST_LIVO2_ROS2_relocation_ultra/PCD"
+      colmap_output_en: false
+      filter_size_pcd: 0.15
+      interval: -1
