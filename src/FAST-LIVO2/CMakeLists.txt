@@ -140,7 +140,11 @@ set(COMMON_DEPENDENCIES)
 if(OpenMP_CXX_FOUND)
   list(APPEND COMMON_DEPENDENCIES OpenMP::OpenMP_CXX)
 endif()
-rosidl_generate_interfaces(${PROJECT_NAME} "msg/State6Stamped.msg" DEPENDENCIES std_msgs geometry_msgs)
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/State6Stamped.msg"
+  "srv/SetInitialPose.srv"
+  DEPENDENCIES std_msgs geometry_msgs
+)
 rosidl_get_typesupport_target(state6_typesupport ${PROJECT_NAME} rosidl_typesupport_cpp)
 
 # link_directories(${COMMON_DEPENDENCIES}

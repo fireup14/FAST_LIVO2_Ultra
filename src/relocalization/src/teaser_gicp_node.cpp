@@ -16,6 +16,8 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+#include <fast_livo/srv/set_initial_pose.hpp>
+#include <unistd.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -59,21 +61,20 @@ public:
         this->declare_parameter("algorithm", algorithm);
         this->declare_parameter("max_attempts", 300);
         this->declare_parameter("timeout_seconds", 120.0);
-        this->declare_parameter("result_hold_seconds", 5.0);
+        this->declare_parameter("initial_pose_timeout_seconds", 30.0);
         algorithm_ = this->get_parameter("algorithm").as_string();
         max_attempts_ = this->get_parameter("max_attempts").as_int();
         timeout_seconds_ = this->get_parameter("timeout_seconds").as_double();
-        result_hold_seconds_ = this->get_parameter("result_hold_seconds").as_double();
+        initial_pose_timeout_seconds_ = this->get_parameter("initial_pose_timeout_seconds").as_double();
         if (algorithm_!="teaser_gicp" && algorithm_!="teaser" && algorithm_!="gicp" && algorithm_!="icp" && algorithm_!="sac_ia_icp")
             throw std::invalid_argument("algorithm must be teaser_gicp, teaser, gicp, icp or sac_ia_icp.");
         // 1. 基础配置
-        this->declare_parameter("locate_in_prior_map", false);
         this->declare_parameter("prior_map_path", "");
+        this->declare_parameter("prior_map_name", "");
         this->declare_parameter("map_frame_id", "map");
         this->declare_parameter("pcl_type", "livox");
         this->declare_parameter<std::vector<double>>("extrin_calib.extrinsic_R", std::vector<double>{});
         this->declare_parameter<std::vector<double>>("extrin_calib.extrinsic_T", std::vector<double>{});
-        this->declare_parameter("uav.gravity_align_en", false);
 
         // 2. 降采样参数
         this->declare_parameter("map_voxel_leaf_size", 0.4);     // TEASER 用较大体素
@@ -99,7 +100,6 @@ public:
         this->declare_parameter("registration_type", "VGICP");
 
         // ================= 获取参数 =================
-        this->get_parameter("locate_in_prior_map", locate_in_prior_map_);
         this->get_parameter("prior_map_path", prior_map_path_);
         this->get_parameter("map_frame_id", map_frame_id_);
         this->get_parameter("pcl_type", pcl_type_);
@@ -132,37 +132,32 @@ public:
             "prior_map", rclcpp::QoS(1).transient_local().reliable());
         transformed_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("transformed_cloud", 10);
 
-        if (!locate_in_prior_map_) {
-            // Keep lightweight placeholder outputs available to late subscribers.
-            disabled_output_timer_ = this->create_wall_timer(
-                std::chrono::seconds(1),
-                std::bind(&TeaserGicpNode::publish_disabled_outputs, this));
-            publish_disabled_outputs();
-            RCLCPP_INFO(this->get_logger(),
-                "locate_in_prior_map=false: map loading and registration disabled; "
-                "publishing identity pose and empty clouds at 1 Hz.");
-            return;
-        }
-
-        if (prior_map_path_.empty() || !std::filesystem::path(prior_map_path_).is_absolute()) {
+        const std::filesystem::path directory(prior_map_path_);
+        const std::filesystem::path filename(this->get_parameter("prior_map_name").as_string());
+        if (!directory.is_absolute() || filename.empty() || filename.has_parent_path() ||
+            filename == "." || filename == "..") {
             throw std::invalid_argument(
-                "locate_in_prior_map=true requires a non-empty prior_map_path.");
+                "Prior localization requires an absolute prior_map_path directory and a plain prior_map_name filename.");
         }
+        prior_map_path_ = (directory / filename).lexically_normal().string();
         initialize_pose_conversion();
         const double positive[] = {teaser_map_voxel_, teaser_cloud_voxel_, gicp_map_voxel_, gicp_cloud_voxel_,
             fpfh_normal_radius_, fpfh_feature_radius_, noise_bound_, max_correspondence_distance_, fitness_score_thre_, timeout_seconds_};
         for (double v : positive) if (!std::isfinite(v) || v<=0) throw std::invalid_argument("Registration sizes, thresholds and timeout must be finite and positive.");
         if (num_threads_<1 || gicp_solver_max_iter_<1 || teaser_solver_max_iter_<1 || teaser_success_count_thre_<1 ||
-            gicp_converged_count_thre_<1 || max_attempts_<1 || inlier_thr<3 || !std::isfinite(result_hold_seconds_) || result_hold_seconds_<0 ||
+            gicp_converged_count_thre_<1 || max_attempts_<1 || inlier_thr<3 || !std::isfinite(initial_pose_timeout_seconds_) || initial_pose_timeout_seconds_<=0 ||
             !std::isfinite(rotation_gnc_factor_) || rotation_gnc_factor_<=1 || fpfh_feature_radius_<=fpfh_normal_radius_ ||
             (registration_type_!="GICP" && registration_type_!="VGICP"))
             throw std::invalid_argument("Invalid registration count, thread count, feature radii or registration_type.");
         omp_set_num_threads(num_threads_);
+        initial_pose_client_ = this->create_client<fast_livo::srv::SetInitialPose>("/fast_livo2/set_initial_pose");
         start_time_ = std::chrono::steady_clock::now();
         watchdog_ = this->create_wall_timer(std::chrono::milliseconds(100), [this] {
-            const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - (finished_ ? success_time_ : start_time_)).count();
-            if (finished_) { if (elapsed>=result_hold_seconds_) rclcpp::shutdown(); }
-            else if (elapsed>=timeout_seconds_) throw std::runtime_error("Relocalization timed out; no initial pose was published.");
+            if (finished_) {
+                deliver_initial_pose();
+            } else if (std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time_).count() >= timeout_seconds_) {
+                throw std::runtime_error("Relocalization timed out; no valid registration result was computed.");
+            }
         });
 
 #ifdef USE_LIVOX
@@ -228,29 +223,6 @@ private:
             "/icp_result represents the initial IMU pose in map: T_map_lidar * inverse(T_imu_lidar). "
             "FAST-LIVO2 applies its measured gravity rotation when enabled. "
             "Keep the device stationary until prior-map initialization completes.");
-    }
-
-    // ===================== 普通建图模式的占位输出 =====================
-    void publish_disabled_outputs()
-    {
-        const auto stamp = this->now();
-
-        // This is a disabled-mode placeholder, not a successful registration.
-        geometry_msgs::msg::PoseWithCovarianceStamped pose_msg;
-        pose_msg.header.stamp = stamp;
-        pose_msg.header.frame_id = map_frame_id_;
-        pose_msg.pose.pose.orientation.w = 1.0;
-        publisher_->publish(pose_msg);
-
-        pcl::PointCloud<pcl::PointXYZ> empty_cloud;
-        empty_cloud.width = 0;
-        empty_cloud.height = 1;
-        sensor_msgs::msg::PointCloud2 cloud_msg;
-        pcl::toROSMsg(empty_cloud, cloud_msg);
-        cloud_msg.header.stamp = stamp;
-        cloud_msg.header.frame_id = map_frame_id_;
-        map_pub_->publish(cloud_msg);
-        transformed_cloud_pub_->publish(cloud_msg);
     }
 
     // ===================== 地图加载 =====================
@@ -534,10 +506,12 @@ private:
     {
         publish_pose(transform);
         publish_debug_cloud(cloud);
-        wait_for_pose_ack();
         finished_ = true;
-        success_time_ = std::chrono::steady_clock::now();
-        RCLCPP_INFO(get_logger(), "Result retained for %.1f seconds for late subscribers, then the solver exits.", result_hold_seconds_);
+        delivery_start_time_ = std::chrono::steady_clock::now();
+        RCLCPP_INFO(get_logger(),
+            "Registration succeeded; waiting up to %.1f seconds for mapping to accept the initial pose via service. Keep stationary.",
+            initial_pose_timeout_seconds_);
+        deliver_initial_pose();
     }
 
     pcl::PointCloud<pcl::FPFHSignature33>::Ptr features(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud)
@@ -608,37 +582,51 @@ private:
         pose_msg.pose.covariance[7] = 0.01;
         pose_msg.pose.covariance[35] = 0.01;
 
+        initial_pose_request_ = std::make_shared<fast_livo::srv::SetInitialPose::Request>();
+        initial_pose_request_->request_id = std::to_string(::getpid()) + "-" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        initial_pose_request_->pose = pose_msg;
+        // Diagnostic topic only; mapping accepts initial poses exclusively through the service.
         publisher_->publish(pose_msg);
         RCLCPP_INFO(this->get_logger(),
-            "Published initial IMU pose in map: x=%.6f, y=%.6f, z=%.6f",
+            "Published diagnostic initial IMU pose in map: x=%.6f, y=%.6f, z=%.6f",
             pose_msg.pose.pose.position.x, pose_msg.pose.pose.position.y, pose_msg.pose.pose.position.z);
     }
 
-    void wait_for_pose_ack()
+    void deliver_initial_pose()
     {
-        constexpr auto timeout = std::chrono::seconds(2);
-        try {
-            if (publisher_->get_subscription_count() == 0) {
-                RCLCPP_WARN(this->get_logger(),
-                    "/icp_result published with no matched subscribers; delivery cannot be confirmed. "
-                    "Start mapping and the TF publisher before relocalization. Shutting down.");
+        const auto now = std::chrono::steady_clock::now();
+        if (initial_pose_future_.valid()) {
+            // Poll without spinning or blocking inside the executor's timer callback.
+            if (initial_pose_future_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                const auto response = initial_pose_future_.get();
+                if (!response->accepted)
+                    throw std::runtime_error("Mapping rejected the initial pose: " + response->message);
+                RCLCPP_INFO(get_logger(),
+                    "Mapping confirmed initial pose acceptance: %s Solver exits; IMU/prior-map initialization continues independently.",
+                    response->message.c_str());
+                rclcpp::shutdown();
                 return;
             }
-
-            if (publisher_->wait_for_all_acked(timeout)) {
-                RCLCPP_INFO(this->get_logger(),
-                    "/icp_result transport ACK wait completed for matched subscribers; "
-                    "this does not confirm mapping initialization.");
-            } else {
-                RCLCPP_WARN(this->get_logger(),
-                    "/icp_result transport ACK wait timed out after 2000 ms; "
-                    "delivery is not confirmed. Shutting down.");
-            }
-        } catch (const std::exception& error) {
-            RCLCPP_WARN(this->get_logger(),
-                "/icp_result transport ACK wait failed: %s; "
-                "delivery is not confirmed. Shutting down.", error.what());
+            if (now - request_sent_time_ < std::chrono::seconds(2) &&
+                std::chrono::duration<double>(now - delivery_start_time_).count() < initial_pose_timeout_seconds_)
+                return;
+            initial_pose_client_->remove_pending_request(pending_request_id_);
+            initial_pose_future_ = {};
+            RCLCPP_WARN(get_logger(), "Initial-pose response not received; retrying the identical request.");
         }
+        if (std::chrono::duration<double>(now - delivery_start_time_).count() >= initial_pose_timeout_seconds_)
+            throw std::runtime_error("Initial pose acceptance timed out; mapping acceptance is unconfirmed.");
+        if (!initial_pose_client_->service_is_ready()) {
+            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000,
+                "Waiting for /fast_livo2/set_initial_pose; mapping acceptance is unconfirmed.");
+            return;
+        }
+        auto pending = initial_pose_client_->async_send_request(initial_pose_request_);
+        // Keep only one pending call, with the same application request ID and pose on every retry.
+        pending_request_id_ = pending.request_id;
+        initial_pose_future_ = std::move(pending.future);
+        request_sent_time_ = now;
     }
 
     void publish_debug_cloud(const pcl::PointCloud<pcl::PointXYZ>& cloud)
@@ -716,13 +704,16 @@ private:
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr lvx_cloud_sub_;
 #endif
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_sub_;
-    rclcpp::TimerBase::SharedPtr disabled_output_timer_;
+    rclcpp::Client<fast_livo::srv::SetInitialPose>::SharedPtr initial_pose_client_;
+    fast_livo::srv::SetInitialPose::Request::SharedPtr initial_pose_request_;
+    rclcpp::Client<fast_livo::srv::SetInitialPose>::Future initial_pose_future_;
+    int64_t pending_request_id_ = 0;
 
     std::string algorithm_;
     int max_attempts_=300, attempts_=0;
-    double timeout_seconds_=120, result_hold_seconds_=5;
+    double timeout_seconds_=120, initial_pose_timeout_seconds_=30;
     bool finished_=false;
-    std::chrono::steady_clock::time_point start_time_,success_time_;
+    std::chrono::steady_clock::time_point start_time_, delivery_start_time_, request_sent_time_;
     rclcpp::TimerBase::SharedPtr watchdog_;
     pcl::PointCloud<pcl::FPFHSignature33>::Ptr sac_target_features_;
     // 状态
@@ -745,7 +736,6 @@ private:
     int gicp_fail_count_ = 0;
 
     // 参数
-    bool locate_in_prior_map_ = false;
     std::string prior_map_path_, map_frame_id_, pcl_type_;
     double teaser_map_voxel_, teaser_cloud_voxel_;
     double gicp_map_voxel_, gicp_cloud_voxel_;

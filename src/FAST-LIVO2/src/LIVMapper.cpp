@@ -132,6 +132,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
     }
   };
 
+  const auto pcd_root = (std::filesystem::path(ROOT_DIR) / "../../PCD").lexically_normal();
+
   // declare parameter
   try_declare.template operator()<std::string>("common.lid_topic", "/livox/lidar");
   try_declare.template operator()<std::string>("common.imu_topic", "/livox/imu");
@@ -188,8 +190,9 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<bool>("time_check.enabled", true);
   try_declare.template operator()<int>("pcd_save.interval", -1);
   try_declare.template operator()<bool>("pcd_save.pcd_save_en", false);
-  try_declare.template operator()<bool>("pcd_save.save_in_localization", false);
-  try_declare.template operator()<std::string>("pcd_save.output_dir", std::string(ROOT_DIR) + "Log/PCD");
+  try_declare.template operator()<bool>("pcd_save.pcd_save_en_relocate", false);
+  try_declare.template operator()<std::string>("pcd_save.output_dir", (pcd_root / "priori").string());
+  try_declare.template operator()<std::string>("pcd_save.output_dir_relocate", (pcd_root / "relocate").string());
   try_declare.template operator()<bool>("pcd_save.colmap_output_en", false);
   try_declare.template operator()<double>("pcd_save.filter_size_pcd", 0.5);
   try_declare.template operator()<vector<double>>("extrin_calib.extrinsic_T", vector<double>{});
@@ -206,7 +209,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<std::string>("publish.map_frame_id", "map");
 
   try_declare.template operator()<bool>("locate_in_prior_map", false);//『GT』
-  try_declare.template operator()<string>("prior_map_path", "");//『GT』
+  try_declare.template operator()<string>("prior_map_path", (pcd_root / "map").string());
+  try_declare.template operator()<string>("prior_map_name", "");
 
   try_declare.template operator()<double>("time_offset.imu_time_offset", 0.0);
   try_declare.template operator()<double>("imu.b_acc_cov", 0.0001);
@@ -215,7 +219,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<bool>("log.lio", false);
   try_declare.template operator()<bool>("log.timing", false);
   try_declare.template operator()<int>("localization.max_unconstrained_frames", 5);
-  try_declare.template operator()<int>("pcd_save.type", 0);
+  try_declare.template operator()<int>("pcd_save.type", -1);
   try_declare.template operator()<bool>("image_save.img_save_en", false);
   try_declare.template operator()<int>("image_save.interval", 1);
   try_declare.template operator()<std::string>("image_save.output_dir", std::string(ROOT_DIR) + "Log/image");
@@ -276,7 +280,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("time_check.enabled", time_check_enabled);
   this->node->get_parameter("pcd_save.interval", pcd_save_interval);
   this->node->get_parameter("pcd_save.pcd_save_en", pcd_save_en);
-  this->node->get_parameter("pcd_save.save_in_localization", pcd_save_in_localization);
+  this->node->get_parameter("pcd_save.pcd_save_en_relocate", pcd_save_in_localization);
   this->node->get_parameter("pcd_save.output_dir", pcd_output_dir);
   this->node->get_parameter("pcd_save.colmap_output_en", colmap_output_en);
   this->node->get_parameter("pcd_save.filter_size_pcd", filter_size_pcd);
@@ -303,6 +307,18 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   node->get_parameter("log.timing", log_timing);
   node->get_parameter("localization.max_unconstrained_frames", max_unconstrained_frames);
   node->get_parameter("pcd_save.type", pcd_save_type);
+  // Resolve automatic coordinates and mode-specific paths once at startup.
+  if (pcd_save_type == -1) pcd_save_type = locate_in_prior_map ? 2 : 0;
+  if (locate_in_prior_map)
+  {
+    node->get_parameter("pcd_save.output_dir_relocate", pcd_output_dir);
+    const std::filesystem::path directory(prior_map_path);
+    const std::filesystem::path filename(node->get_parameter("prior_map_name").as_string());
+    if (!directory.is_absolute() || filename.empty() || filename.has_parent_path() ||
+        filename == "." || filename == "..")
+      throw std::invalid_argument("Prior localization requires an absolute prior_map_path directory and a plain prior_map_name filename.");
+    prior_map_path = (directory / filename).lexically_normal().string();
+  }
   node->get_parameter("image_save.img_save_en", img_save_en);
   node->get_parameter("image_save.interval", img_save_interval);
   node->get_parameter("image_save.output_dir", image_output_dir);
@@ -435,7 +451,7 @@ void LIVMapper::initializeFiles()
   }
   else
   {
-    RCLCPP_INFO(this->node->get_logger(), "定位模式 PCD 保存已禁用：pcd_save.save_in_localization=false，不累积或写出观测点云。");
+    RCLCPP_INFO(this->node->get_logger(), "定位模式 PCD 保存已禁用：pcd_save.pcd_save_en_relocate=false，不累积或写出观测点云。");
   }
 
   if (pose_output_en) std::filesystem::create_directories(std::string(ROOT_DIR) + "Log/result");
@@ -470,7 +486,9 @@ void LIVMapper::initializeSubscribersAndPublishers(rclcpp::Node::SharedPtr &node
   /*『GT』*/
   if (locate_in_prior_map) 
   {
-      sub_init_pose_ = this->node->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>("/icp_result", rclcpp::QoS(1).reliable().transient_local(), std::bind(&LIVMapper::initial_pose_cbk, this, std::placeholders::_1));
+      initial_pose_service_ = this->node->create_service<fast_livo::srv::SetInitialPose>(
+          "/fast_livo2/set_initial_pose",
+          std::bind(&LIVMapper::set_initial_pose_cbk, this, std::placeholders::_1, std::placeholders::_2));
       initial_map_pose_pub_ = this->node->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
           "/fast_livo2/initial_map_pose", rclcpp::QoS(1).reliable().transient_local());
   }
@@ -1415,37 +1433,69 @@ void LIVMapper::livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstShar
   mtx_buffer.unlock();
   sig_buffer.notify_all();
 }
-/* 『GT』*/
-//之后当有符合类型的消息在话题 "/icp_result"（或被重映射的同名话题）被发布时，
-//订阅回调 LaserMappingNode::initial_pose_cbk 会被调用并将初始位姿保存并将 initial_pose_received 置为 true。
-void LIVMapper::initial_pose_cbk(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
+// A service response confirms acceptance, not completion of IMU/prior-map initialization.
+void LIVMapper::set_initial_pose_cbk(
+    const fast_livo::srv::SetInitialPose::Request::SharedPtr request,
+    fast_livo::srv::SetInitialPose::Response::SharedPtr response)
 {
-  if (initial_pose_received)
-  {
-    RCLCPP_WARN(this->node->get_logger(), "Ignoring another initial pose: this mapping session already has an initial IMU pose.");
+  const auto reject = [&](const std::string &reason) {
+    response->accepted = false;
+    response->message = reason;
+    RCLCPP_WARN(this->node->get_logger(), "Initial pose rejected: %s", reason.c_str());
+  };
+  if (!locate_in_prior_map) {
+    reject("Initial poses are only accepted in prior-map localization mode.");
     return;
   }
-  const auto &p = msg->pose.pose.position;
-  const auto &o = msg->pose.pose.orientation;
+  if (request->request_id.empty()) {
+    reject("request_id must not be empty.");
+    return;
+  }
+  if (initial_pose_received) {
+    // A lost response may cause the exact same request to be sent again.
+    // Never replace the accepted pose or recreate subscriptions on a retry.
+    if (request->request_id == accepted_initial_pose_request_.request_id &&
+        request->pose == accepted_initial_pose_request_.pose) {
+      response->accepted = true;
+      response->message = "This request was already accepted; initialization continues independently.";
+    } else {
+      reject("This mapping session already accepted an initial pose; only the identical request may be retried.");
+    }
+    return;
+  }
+  const auto &msg = request->pose;
+  const auto &p = msg.pose.pose.position;
+  const auto &o = msg.pose.pose.orientation;
   Eigen::Quaterniond q(o.w, o.x, o.y, o.z);
-  if (msg->header.frame_id != map_frame_id_ || !std::isfinite(p.x) || !std::isfinite(p.y) ||
-      !std::isfinite(p.z) || !q.coeffs().allFinite() || !std::isfinite(q.norm()) || q.norm() < 1e-12)
+  if (msg.header.frame_id != map_frame_id_ || !std::isfinite(p.x) || !std::isfinite(p.y) ||
+      !std::isfinite(p.z) || !q.coeffs().allFinite() || !std::isfinite(q.norm()) || q.norm() < 1e-12 ||
+      !std::all_of(msg.pose.covariance.begin(), msg.pose.covariance.end(), [](double v) { return std::isfinite(v); }))
   {
-    RCLCPP_WARN(this->node->get_logger(), "Ignoring invalid initial IMU pose: expected frame '%s', finite position and a non-zero finite quaternion.",
-                map_frame_id_.c_str());
+    reject("Expected frame '" + map_frame_id_ + "', finite position/covariance and a non-zero finite quaternion.");
     return;
   }
-  initial_pose = *msg;
+  auto normalized_pose = msg;
   q.normalize();
-  initial_pose.pose.pose.orientation.x = q.x();
-  initial_pose.pose.pose.orientation.y = q.y();
-  initial_pose.pose.pose.orientation.z = q.z();
-  initial_pose.pose.pose.orientation.w = q.w();
+  normalized_pose.pose.pose.orientation.x = q.x();
+  normalized_pose.pose.pose.orientation.y = q.y();
+  normalized_pose.pose.pose.orientation.z = q.z();
+  normalized_pose.pose.pose.orientation.w = q.w();
+  try {
+    initializeSensorSubscriptions();
+  } catch (const std::exception &error) {
+    sub_pcl.reset();
+    sub_imu.reset();
+    sub_img.reset();
+    reject(std::string("Cannot create sensor subscriptions: ") + error.what());
+    return;
+  }
+  initial_pose = normalized_pose;
+  accepted_initial_pose_request_ = *request;
   initial_pose_received = true;
-  initializeSensorSubscriptions();
-  RCLCPP_INFO(this->node->get_logger(), "Initial pose received. Initial IMU pose accepted; keep stationary until prior-map initialization completes.");
+  response->accepted = true;
+  response->message = "Initial IMU pose accepted; keep stationary until prior-map initialization completes.";
+  RCLCPP_INFO(this->node->get_logger(), "%s", response->message.c_str());
 }
-/* 『GT』*/
 
 void LIVMapper::imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in)
 {

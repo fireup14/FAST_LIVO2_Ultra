@@ -2,3 +2,10 @@
 /install/
 /log/
 /logs/
+# Keep PCD folders and tools; ignore generated map data.
+/PCD/**
+!/PCD/**/
+!/PCD/**/.gitkeep
+!/PCD/scripts/**
+/PCD/**/*.[pP][cC][dD]
+/PCD/**/__pycache__/

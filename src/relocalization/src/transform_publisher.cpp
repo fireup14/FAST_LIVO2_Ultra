@@ -1,12 +1,11 @@
 /*
-将配置的话题中的最终局部参考系位姿直接发布为静态 TF。
-开启重力对齐的定位模式使用建图完成初始化后发布的最终位姿。
+将建图完成先验初始化后的最终局部参考系位姿发布为静态 TF。
+固定订阅 /fast_livo2/initial_map_pose，并常驻维护 map -> camera_init。
 */
 #include <rclcpp/rclcpp.hpp>
 #include <cmath>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <tf2_ros/static_transform_broadcaster.h>
-#include <tf2/LinearMath/Quaternion.h>
 
 class TransformPublisherNode : public rclcpp::Node
 {
@@ -14,21 +13,14 @@ public:
     TransformPublisherNode()
         : Node("transform_publisher_node")
     {
-        this->declare_parameter<std::string>("odom_frame_id","camera_init");
-        this->declare_parameter<std::string>("map_frame_id","map");
-        this->declare_parameter<std::string>("initial_pose_topic", "icp_result");
-        this->declare_parameter<bool>("initial_pose_transient_local", false);
-
-        this->get_parameter_or<std::string>("odom_frame_id", odom_frame_id, "camera_init");
-        this->get_parameter_or<std::string>("map_frame_id", map_frame_id, "map");
-        const auto topic = this->get_parameter("initial_pose_topic").as_string();
-        const bool transient_local = this->get_parameter("initial_pose_transient_local").as_bool();
-        auto qos = rclcpp::QoS(transient_local ? 1 : 10).reliable();
-        if (transient_local) qos.transient_local();
+        odom_frame_id = this->declare_parameter<std::string>("odom_frame_id", "camera_init");
+        map_frame_id = this->declare_parameter<std::string>("map_frame_id", "map");
         broadcaster_ = std::make_shared<tf2_ros::StaticTransformBroadcaster>(this);
         subscription_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
-            topic, qos, std::bind(&TransformPublisherNode::callback, this, std::placeholders::_1));
-        RCLCPP_INFO(this->get_logger(), "Waiting on '%s' for the map -> camera_init alignment.", topic.c_str());
+            "/fast_livo2/initial_map_pose", rclcpp::QoS(1).reliable().transient_local(),
+            std::bind(&TransformPublisherNode::callback, this, std::placeholders::_1));
+        RCLCPP_INFO(this->get_logger(),
+            "Waiting on /fast_livo2/initial_map_pose for the map -> camera_init alignment.");
     }
 
 private:

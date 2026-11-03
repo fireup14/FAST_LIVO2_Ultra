@@ -30,6 +30,7 @@ which is included as part of this source code package.
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <fast_livo/msg/state6_stamped.hpp>
+#include <fast_livo/srv/set_initial_pose.hpp>
 #include <vikit/camera_loader.h>
 
 /*『GT』*/
@@ -92,7 +93,8 @@ public:
   void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg_in);
   void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in);
   void img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in);
-  void initial_pose_cbk(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
+  void set_initial_pose_cbk(const fast_livo::srv::SetInitialPose::Request::SharedPtr request,
+                            fast_livo::srv::SetInitialPose::Response::SharedPtr response);
   void publish_img_rgb(const image_transport::Publisher &pubImage, VIOManagerPtr vio_manager);
   void publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubLaserCloudFullRes, VIOManagerPtr vio_manager);
   void publish_visual_sub_map(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubSubVisualMap);
@@ -245,7 +247,8 @@ public:
   std::string prior_map_path;//『GT』
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_img;
-  rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr sub_init_pose_;//『GT』
+  rclcpp::Service<fast_livo::srv::SetInitialPose>::SharedPtr initial_pose_service_;
+  fast_livo::srv::SetInitialPose::Request accepted_initial_pose_request_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFullRes;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubNormal;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubSubVisualMap;

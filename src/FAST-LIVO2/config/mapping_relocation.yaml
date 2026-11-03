@@ -3,9 +3,10 @@
     # false：MID360 + IMU 普通建图；true：先验地图定位。
     # 建图与重定位共用模式和地图路径；本次重力对齐由 uav.gravity_align_en 控制。
     locate_in_prior_map: true
-    # 普通建图允许留空；定位模式需填写已有 PCD 的绝对路径，另行启动外部重定位节点。
-    # 重定位入口读取此处同一个路径；launch 不检查或转换地图路径。
-    prior_map_path: "/home/fire/Desktop/FAST_LIVO2_Ultra/PCD/map_1102_2327.pcd"
+    # 固定读取目录；将选中的先验放入此目录，通常只需修改文件名。
+    # 建图与重定位共同读取 prior_map_path / prior_map_name。
+    prior_map_path: "/home/fire/Desktop/FAST_LIVO2_Ultra/PCD/map"
+    prior_map_name: "map_1103_2217.pcd"
 
     time_check:
       # 启动时只读校验系统时钟同步状态；失败立即退出，不进入建图。
@@ -116,15 +117,18 @@
     pcd_save:
       # interval=-1 时正常退出后写盘；目录必须是绝对路径，程序会自动创建。
       # 启动时固定 map_MMDD_HHMM 前缀；正数间隔分段追加 _0001 等序号。
-      pcd_save_en: true
+      pcd_save_en:            true
+      # -1=初始化时随模式选择：无先验为0，有先验为2；也可显式选择0/1/2。
       # 0=局部 camera_init；1=各帧 IMU 系（不能直接叠图）；2=先验 map 系。
-      type: 0
+      type:                   -1
       # 定位模式需总开关和本开关同时开启才保存；普通建图不受本项影响。
-      save_in_localization: true
-      output_dir: "/home/fire/Desktop/FAST_LIVO2_Ultra/PCD"
-      colmap_output_en: false
-      filter_size_pcd: 0.15
-      interval: -1
+      pcd_save_en_relocate:   true
+      # 固定保存目录：初始化时按 locate_in_prior_map 选择，通常不改。
+      output_dir:             "/home/fire/Desktop/FAST_LIVO2_Ultra/PCD/priori"
+      output_dir_relocate:    "/home/fire/Desktop/FAST_LIVO2_Ultra/PCD/relocate"
+      colmap_output_en:       false
+      filter_size_pcd:        0.15
+      interval:               -1
 
     # 输出日志默认关闭；告警和初始化结果不受这些开关影响。
     log:
@@ -146,4 +150,5 @@
       num_threads: 4
       max_attempts: 300
       timeout_seconds: 120.0
-      result_hold_seconds: 5.0
+      # 配准成功后，等待建图服务明确接受初值的最长时间；不等待 IMU／先验体素初始化。
+      initial_pose_timeout_seconds: 30.0

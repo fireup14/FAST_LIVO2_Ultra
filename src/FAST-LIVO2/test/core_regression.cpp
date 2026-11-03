@@ -35,6 +35,36 @@ int main(int argc, char **argv) {
     check(mapper.p_imu->cov_bias_acc.isApprox(V3D::Constant(0.002)) && mapper.p_imu->cov_bias_gyr.isApprox(V3D::Constant(0.003)),"Bias noise did not reach IMU processor"); ++count;
     check(mapper.IMG_POINT_COV==123.5 && mapper.outlier_threshold==234.5,"Fractional visual noise lost precision"); ++count;
     check(mapper.filter_size_map_min==0.1,"Unsafe prior filter fallback"); ++count;
+    auto read_profile = [&](bool prior, int coordinate) {
+      mapper.node->set_parameters({
+        rclcpp::Parameter("locate_in_prior_map",prior), rclcpp::Parameter("pcd_save.type",coordinate),
+        rclcpp::Parameter("prior_map_path","/tmp/ultra-input"),
+        rclcpp::Parameter("prior_map_name","prior map.pcd"),
+        rclcpp::Parameter("pcd_save.output_dir","/tmp/ultra-priori"),
+        rclcpp::Parameter("pcd_save.output_dir_relocate","/tmp/ultra-relocate")});
+      mapper.readParameters(mapper.node);
+    };
+    read_profile(false,-1);
+    check(mapper.pcd_save_type==0 && mapper.pcd_output_dir=="/tmp/ultra-priori","Mapping auto profile incorrect"); ++count;
+    read_profile(true,-1);
+    check(mapper.pcd_save_type==2 && mapper.pcd_output_dir=="/tmp/ultra-relocate","Prior auto profile incorrect"); ++count;
+    check(mapper.prior_map_path=="/tmp/ultra-input/prior map.pcd","Prior directory/name not joined"); ++count;
+    for(int coordinate=0;coordinate<3;++coordinate) {
+      read_profile(true,coordinate);
+      check(mapper.pcd_save_type==coordinate,"Explicit coordinate option changed"); ++count;
+    }
+    for(int coordinate : {-2,3}) { rejects([&]{read_profile(false,coordinate);},"Invalid coordinate accepted"); ++count; }
+    for(const auto *name : {"", "../outside.pcd", "/outside.pcd"}) {
+      read_profile(true,-1);
+      mapper.node->set_parameter(rclcpp::Parameter("prior_map_name",name));
+      rejects([&]{mapper.readParameters(mapper.node);},"Invalid prior filename accepted"); ++count;
+    }
+    read_profile(true,-1);
+    mapper.node->set_parameter(rclcpp::Parameter("pcd_save.pcd_save_en_relocate",true));
+    mapper.readParameters(mapper.node);
+    check(mapper.pcd_save_in_localization,"Renamed localization save switch ignored"); ++count;
+    read_profile(false,-1);
+
     mapper.last_timestamp_lidar=100.0;
     mapper.last_timestamp_imu=99.0;
     auto imu=std::make_shared<sensor_msgs::msg::Imu>();
@@ -132,6 +162,19 @@ int main(int argc, char **argv) {
       mapper.savePCD(); saved.clear();
       pcl::io::loadPCDFile((output/(mapper.pcd_file_prefix+".pcd")).string(),saved);
       check(saved.size()==1 && std::abs(saved[0].x-(coordinate==2?3:1))<1e-6,"PCD coordinate selection incorrect"); ++count;
+    }
+    for(bool prior : {false,true}) for(int interval : {-1,1}) {
+      read_profile(prior,-1);
+      mapper.pcd_output_dir=output.string(); mapper.pcd_save_en=true; mapper.pcd_save_in_localization=true;
+      mapper.pcd_save_interval=interval; mapper.pcd_index=0; mapper.save_scan_count=0;
+      mapper.pcd_file_prefix=std::string(prior ? "prior" : "mapping")+(interval<0 ? "_whole" : "_segments");
+      mapper.pcl_wait_save_intensity->clear(); mapper.pcl_wait_save->clear();
+      mapper.pcl_w_wait_pub->clear(); mapper.pcl_w_wait_pub->push_back(p);
+      mapper.publish_frame_world(mapper.pubLaserCloudFullRes,mapper.vio_manager);
+      mapper.savePCD(); saved.clear();
+      const auto file=output/(mapper.pcd_file_prefix+(interval>0 ? "_0001.pcd" : ".pcd"));
+      check(pcl::io::loadPCDFile(file.string(),saved)==0 && saved.size()==1 &&
+            std::abs(saved[0].x-(prior ? 3.0 : 1.0))<1e-6,"Interval/mode saving failed"); ++count;
     }
     std::filesystem::remove_all(output);
     rclcpp::shutdown();
