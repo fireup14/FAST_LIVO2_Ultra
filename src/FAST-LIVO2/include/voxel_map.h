@@ -44,6 +44,9 @@ typedef struct VoxelMapConfig
   double dept_err_;
   double sigma_num_;
   bool is_pub_plane_map_;
+  bool log_features_ = false, log_sliding_ = false;
+  int min_effective_points_ = 6;
+  double plane_publish_period_ = 0.2;
 
   // config of local map sliding
   double sliding_thresh;
@@ -188,6 +191,7 @@ class VoxelMapManager
 {
 public:
   VoxelMapManager() = default;
+  ~VoxelMapManager() { for (auto &entry : voxel_map_) delete entry.second; }
   VoxelMapConfig config_setting_;
   int current_frame_id_ = 0;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr voxel_map_pub_;
@@ -226,10 +230,11 @@ public:
     feats_down_world_.reset(new PointCloudXYZI());
   };
 
-  void StateEstimation(StatesGroup &state_propagat);
+  bool StateEstimation(StatesGroup &state_propagat);
   void TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud,
                       pcl::PointCloud<pcl::PointXYZI>::Ptr &trans_cloud);
 
+  size_t countValidPlanes() const;
   void BuildVoxelMap();
   V3F RGBFromVoxel(const V3D &input_point);
 

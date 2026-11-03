@@ -35,7 +35,7 @@ add_library(${PROJECT_NAME} SHARED ${SOURCEFILES})
 # Modify target_include_directories to include the project directory directly
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
+  $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
 )
 
 target_link_libraries(${PROJECT_NAME}
@@ -59,7 +59,7 @@ install(TARGETS ${PROJECT_NAME}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
-  INCLUDES DESTINATION include
+  INCLUDES DESTINATION include/${PROJECT_NAME}
 )
 
 # Export the include directory for the project

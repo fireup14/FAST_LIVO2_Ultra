@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 
+class MapIOError(ValueError):
+    pass
+
 import numpy as np
 import os
 import matplotlib.pyplot as plt
@@ -34,7 +37,7 @@ def load_povray_depthmap(depthmap_full_file_path, rows, cols,
                          scale_factor = 1.0, is_megapov_depthmap = 0):
   depth_array = []  
   try:
-    depth_array = load_depthmap(depthmap_full_file_path, rows, cols, is_megapov_depthmap)
+    depth_array = load_depthmap(depthmap_full_file_path, rows, cols, is_megapov_depthmap=is_megapov_depthmap)
   except IOError:
     raise
   except MapIOError:

@@ -11,6 +11,9 @@ which is included as part of this source code package.
 */
 
 #include "voxel_map.h"
+#include <chrono>
+#include <functional>
+#include <stdexcept>
 using namespace Eigen;
 void calcBodyCov(Eigen::Vector3d &pb, const float range_inc, const float degree_inc, Eigen::Matrix3d &cov)
 {
@@ -65,7 +68,15 @@ void loadVoxelConfig(rclcpp::Node::SharedPtr &node, VoxelMapConfig &voxel_config
   try_declare.template operator()<int>("local_map.half_map_size", 100);
   try_declare.template operator()<double>("local_map.sliding_thresh", 8.0);
 
+  try_declare.template operator()<bool>("log.lio", false);
+  try_declare.template operator()<bool>("log.map_sliding", false);
+  try_declare.template operator()<int>("lio.min_effective_points", 6);
+  try_declare.template operator()<double>("publish.plane_publish_period", 0.2);
   // get parameter
+  node->get_parameter("log.lio", voxel_config.log_features_);
+  node->get_parameter("log.map_sliding", voxel_config.log_sliding_);
+  node->get_parameter("lio.min_effective_points", voxel_config.min_effective_points_);
+  node->get_parameter("publish.plane_publish_period", voxel_config.plane_publish_period_);
   node->get_parameter("publish.pub_plane_en", voxel_config.is_pub_plane_map_);
   node->get_parameter("lio.max_layer", voxel_config.max_layer_);
   node->get_parameter("lio.voxel_size", voxel_config.max_voxel_size_);
@@ -79,6 +90,17 @@ void loadVoxelConfig(rclcpp::Node::SharedPtr &node, VoxelMapConfig &voxel_config
   node->get_parameter("local_map.map_sliding_en", voxel_config.map_sliding_en);
   node->get_parameter("local_map.half_map_size", voxel_config.half_map_size);
   node->get_parameter("local_map.sliding_thresh", voxel_config.sliding_thresh);
+  if (voxel_config.max_iterations_ < 1 || voxel_config.min_effective_points_ < 1 ||
+      voxel_config.max_layer_ < 0 || voxel_config.max_layer_ > 8 ||
+      voxel_config.layer_init_num_.size() <= static_cast<size_t>(voxel_config.max_layer_) ||
+      !std::isfinite(voxel_config.max_voxel_size_) || voxel_config.max_voxel_size_ <= 0 ||
+      !std::isfinite(voxel_config.planner_threshold_) || voxel_config.planner_threshold_ <= 0 ||
+      !std::isfinite(voxel_config.plane_publish_period_) || voxel_config.plane_publish_period_ <= 0 ||
+      voxel_config.max_points_num_ < 3)
+    throw std::invalid_argument("Invalid voxel geometry, iteration count or publication period.");
+  for (int layer=0; layer<=voxel_config.max_layer_; ++layer)
+    if (voxel_config.layer_init_num_[layer] < 3 || voxel_config.layer_init_num_[layer] >= voxel_config.max_points_num_)
+      throw std::invalid_argument("lio.layer_init_num must be >=3 and smaller than max_points_num.");
 }
 
 void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPlane *plane)
@@ -96,15 +118,11 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
   }
   plane->center_ = plane->center_ / plane->points_size_;
   plane->covariance_ = plane->covariance_ / plane->points_size_ - plane->center_ * plane->center_.transpose();
-  Eigen::EigenSolver<Eigen::Matrix3d> es(plane->covariance_);
-  Eigen::Matrix3cd evecs = es.eigenvectors();
-  Eigen::Vector3cd evals = es.eigenvalues();
-  Eigen::Vector3d evalsReal;
-  evalsReal = evals.real();
-  Eigen::Matrix3f::Index evalsMin, evalsMax;
-  evalsReal.rowwise().sum().minCoeff(&evalsMin);
-  evalsReal.rowwise().sum().maxCoeff(&evalsMax);
-  int evalsMid = 3 - evalsMin - evalsMax;
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(plane->covariance_);
+  if (es.info() != Eigen::Success || !es.eigenvalues().allFinite()) { plane->is_plane_ = false; return; }
+  Eigen::Matrix3cd evecs = es.eigenvectors().cast<std::complex<double>>();
+  Eigen::Vector3d evalsReal = es.eigenvalues();
+  const int evalsMin = 0, evalsMid = 1, evalsMax = 2;
   Eigen::Vector3d evecMin = evecs.real().col(evalsMin);
   Eigen::Vector3d evecMid = evecs.real().col(evalsMid);
   Eigen::Vector3d evecMax = evecs.real().col(evalsMax);
@@ -112,7 +130,7 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
   J_Q << 1.0 / plane->points_size_, 0, 0, 0, 1.0 / plane->points_size_, 0, 0, 0, 1.0 / plane->points_size_;
   // && evalsReal(evalsMid) > 0.05
   //&& evalsReal(evalsMid) > 0.01
-  if (evalsReal(evalsMin) < planer_threshold_)
+  if (evalsReal(evalsMin) < planer_threshold_ && evalsReal(evalsMid) > 1e-9 && evalsReal(evalsMid)-evalsReal(evalsMin) > 1e-9)
   {
     for (int i = 0; i < points.size(); i++)
     {
@@ -364,7 +382,7 @@ VoxelOctoTree *VoxelOctoTree::Insert(const pointWithVar &pv)
   return nullptr;
 }
 
-void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
+bool VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 {
   cross_mat_list_.clear();
   cross_mat_list_.reserve(feats_down_size_);
@@ -430,7 +448,8 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       total_residual += fabs(ptpl_list_[i].dis_to_plane_);
     }
     effct_feat_num_ = ptpl_list_.size();
-    cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_ 
+    if (effct_feat_num_ < config_setting_.min_effective_points_) { state_ = state_propagat; return false; }
+    if (config_setting_.log_features_) cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_
          << " effective feature num: " << effct_feat_num_ << " average residual: " << total_residual / effct_feat_num_ << endl;
 
     /*** Computation of Measuremnt Jacobian matrix H and measurents covarience
@@ -500,6 +519,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     VD(DIM_STATE)
     solution = K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec.block<DIM_STATE, 1>(0, 0) - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
     int minRow, minCol;
+    if (!solution.allFinite()) { state_ = state_propagat; return false; }
     state_ += solution;
     auto rot_add = solution.block<3, 1>(0, 0);
     auto t_add = solution.block<3, 1>(3, 0);
@@ -537,6 +557,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 
   // cout << "[ Mapping ] ekf_time: " << ekf_time << "s, build_residual_time: " << build_residual_time << "s" << endl;
   // cout << "[ Mapping ] ave_ekf_time: " << ave_ekf_time << "s, ave_build_residual_time: " << ave_build_residual_time << "s" << endl;
+  return state_.rot_end.allFinite() && state_.pos_end.allFinite() && state_.cov.allFinite();
 }
 
 void VoxelMapManager::TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud,
@@ -556,6 +577,21 @@ void VoxelMapManager::TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vec
     pi.intensity = p_c.intensity;
     trans_cloud->points.push_back(pi);
   }
+}
+
+size_t VoxelMapManager::countValidPlanes() const
+{
+  std::function<size_t(const VoxelOctoTree*)> count = [&](const VoxelOctoTree *tree) -> size_t {
+    if (!tree) return 0;
+    const auto *p = tree->plane_ptr_;
+    if (p && p->is_plane_ && p->normal_.allFinite() && p->plane_var_.allFinite()) return 1;
+    size_t n = 0;
+    for (const auto *child : tree->leaves_) n += count(child);
+    return n;
+  };
+  size_t n = 0;
+  for (const auto &entry : voxel_map_) n += count(entry.second);
+  return n;
 }
 
 void VoxelMapManager::BuildVoxelMap()
@@ -824,10 +860,16 @@ void VoxelMapManager::pubVoxelMap()
 {
   double max_trace = 0.25;
   double pow_num = 0.2;
-  rclcpp::Rate loop(500);
+  static auto last_publish = std::chrono::steady_clock::time_point::min();
+  const auto now = std::chrono::steady_clock::now();
+  if (last_publish != std::chrono::steady_clock::time_point::min() &&
+      std::chrono::duration<double>(now-last_publish).count() < config_setting_.plane_publish_period_) return;
+  last_publish = now;
   float use_alpha = 0.8;
   visualization_msgs::msg::MarkerArray voxel_plane;
-  voxel_plane.markers.reserve(1000000);
+  visualization_msgs::msg::Marker clear;
+  clear.action = visualization_msgs::msg::Marker::DELETEALL;
+  voxel_plane.markers.push_back(clear);
   std::vector<VoxelPlane> pub_plane_list;
   for (auto iter = voxel_map_.begin(); iter != voxel_map_.end(); iter++)
   {
@@ -849,13 +891,13 @@ void VoxelMapManager::pubVoxelMap()
     pubSinglePlane(voxel_plane, "plane", pub_plane_list[i], alpha, plane_rgb);
   }
   voxel_map_pub_->publish(voxel_plane);
-  loop.sleep();
+
 }
 
 void VoxelMapManager::GetUpdatePlane(const VoxelOctoTree *current_octo, const int pub_max_voxel_layer, std::vector<VoxelPlane> &plane_list)
 {
   if (current_octo->layer_ > pub_max_voxel_layer) { return; }
-  if (current_octo->plane_ptr_->is_update_) { plane_list.push_back(*current_octo->plane_ptr_); }
+  if (current_octo->plane_ptr_->is_plane_) { plane_list.push_back(*current_octo->plane_ptr_); }
   if (current_octo->layer_ < current_octo->max_layer_)
   {
     if (!current_octo->plane_ptr_->is_plane_)
@@ -892,7 +934,7 @@ void VoxelMapManager::pubSinglePlane(visualization_msgs::msg::MarkerArray &plane
   plane.color.r = rgb(0);
   plane.color.g = rgb(1);
   plane.color.b = rgb(2);
-  plane.lifetime = rclcpp::Duration::from_seconds(0.01);
+  plane.lifetime = rclcpp::Duration::from_seconds(0.0);
   plane_pub.markers.push_back(plane);
 }
 
@@ -960,7 +1002,7 @@ void VoxelMapManager::mapSliding()
 {
   if((position_last_ - last_slide_position).norm() < config_setting_.sliding_thresh)
   {
-    std::cout<<RED<<"[DEBUG]: Last sliding length "<<(position_last_ - last_slide_position).norm()<<RESET<<"\n";
+    if (config_setting_.log_sliding_) std::cout<<RED<<"[DEBUG]: Last sliding length "<<(position_last_ - last_slide_position).norm()<<RESET<<"\n";
     return;
   }
 
@@ -978,7 +1020,7 @@ void VoxelMapManager::mapSliding()
                     (int64_t)loc_xyz[1] + config_setting_.half_map_size, (int64_t)loc_xyz[1] - config_setting_.half_map_size,
                     (int64_t)loc_xyz[2] + config_setting_.half_map_size, (int64_t)loc_xyz[2] - config_setting_.half_map_size);
   double t_sliding_end = omp_get_wtime();
-  std::cout<<RED<<"[DEBUG]: Map sliding using "<<t_sliding_end - t_sliding_start<<" secs"<<RESET<<"\n";
+  if (config_setting_.log_sliding_) std::cout<<RED<<"[DEBUG]: Map sliding using "<<t_sliding_end - t_sliding_start<<" secs"<<RESET<<"\n";
   return;
 }
 
@@ -1001,6 +1043,6 @@ void VoxelMapManager::clearMemOutOfMap(const int& x_max,const int& x_min,const i
       ++it;
     }
   }
-  std::cout<<RED<<"[DEBUG]: Delete "<<delete_voxel_cout<<" root voxels"<<RESET<<"\n";
+  if (config_setting_.log_sliding_) std::cout<<RED<<"[DEBUG]: Delete "<<delete_voxel_cout<<" root voxels"<<RESET<<"\n";
   // std::cout<<RED<<"[DEBUG]: Delete "<<delete_voxel_cout<<" voxels using "<<delete_time<<" s"<<RESET<<"\n";
 }

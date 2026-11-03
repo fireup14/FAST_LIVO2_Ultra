@@ -28,6 +28,8 @@ which is included as part of this source code package.
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
+#include <std_msgs/msg/bool.hpp>
+#include <fast_livo/msg/state6_stamped.hpp>
 #include <vikit/camera_loader.h>
 
 /*『GT』*/
@@ -59,6 +61,9 @@ public:
   LIVMapper(rclcpp::Node::SharedPtr &node, std::string node_name, const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
   ~LIVMapper();
   void initializeSubscribersAndPublishers(rclcpp::Node::SharedPtr &nh);
+  void initializeSensorSubscriptions();
+  void writeMapMetadata();
+  void writeScanPose();
   void initializeComponents(rclcpp::Node::SharedPtr &node);
   void initializeMapSession();
   void initializePriorMap();
@@ -144,6 +149,17 @@ public:
   nav_msgs::msg::Odometry imu_prop_odom;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubImuPropOdom;
   double imu_time_offset = 0.0;
+  double b_acc_cov = 0.0001, b_gyr_cov = 0.0001;
+  bool log_sensor = false, log_lio = false, log_timing = false;
+  bool tracking_valid = false;
+  int unconstrained_frames = 0, max_unconstrained_frames = 5;
+  int pcd_save_type = 0, save_scan_count = 0;
+  bool img_save_en = false;
+  int img_save_interval = 1, image_count = 0;
+  std::string image_output_dir;
+  std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr tracking_valid_pub_;
+  rclcpp::Publisher<fast_livo::msg::State6Stamped>::SharedPtr state6_stamped_pub_, state6_imu_stamped_pub_;
 
   bool gravity_align_en = false, gravity_align_finished = false;
 
@@ -160,7 +176,7 @@ public:
   int lidar_en = 1;
   bool is_first_frame = false;
   int grid_size, patch_size, grid_n_width, grid_n_height, patch_pyrimid_level;
-  int outlier_threshold;
+  double outlier_threshold;
   double plot_time;
   int frame_cnt;
   double img_time_offset = 0.0;
@@ -177,9 +193,10 @@ public:
   vector<pointWithVar> _pv_list;
   vector<double> extrinT;
   vector<double> extrinR;
+  vector<double> cameraextrinTcl;
   vector<double> cameraextrinT;
   vector<double> cameraextrinR;
-  int IMG_POINT_COV;
+  double IMG_POINT_COV;
 
   PointCloudXYZI::Ptr visual_sub_map;
   PointCloudXYZI::Ptr feats_undistort;

@@ -3,6 +3,7 @@
 开启重力对齐的定位模式使用建图完成初始化后发布的最终位姿。
 */
 #include <rclcpp/rclcpp.hpp>
+#include <cmath>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2/LinearMath/Quaternion.h>
@@ -33,6 +34,14 @@ public:
 private:
     void callback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
     {
+        if (received_) return;
+        const auto &p=msg->pose.pose.position; auto q=msg->pose.pose.orientation;
+        const double norm=std::sqrt(q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w);
+        if (msg->header.frame_id!=map_frame_id || !std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) || !std::isfinite(norm) || norm<1e-12) {
+            RCLCPP_WARN(get_logger(), "Ignoring invalid map alignment pose."); return;
+        }
+        q.x/=norm; q.y/=norm; q.z/=norm; q.w/=norm;
+        received_=true;
         geometry_msgs::msg::TransformStamped transform;
         transform.header.stamp = this->now();
         transform.header.frame_id = map_frame_id;
@@ -40,7 +49,7 @@ private:
         transform.transform.translation.x = msg->pose.pose.position.x;
         transform.transform.translation.y = msg->pose.pose.position.y;
         transform.transform.translation.z = msg->pose.pose.position.z;
-        transform.transform.rotation = msg->pose.pose.orientation;
+        transform.transform.rotation = q;
 
         broadcaster_->sendTransform(transform);
     }
@@ -48,6 +57,7 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr subscription_;
     std::shared_ptr<tf2_ros::StaticTransformBroadcaster> broadcaster_;
     std::string odom_frame_id, map_frame_id;
+    bool received_=false;
 };
 
 int main(int argc, char * argv[])

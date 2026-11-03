@@ -84,7 +84,8 @@ class VIOManager
 {
 public:
   int grid_size;
-  vk::AbstractCamera *cam;
+  std::string colmap_output_dir;
+  vk::AbstractCamera *cam = nullptr;
   vk::PinholeCamera *pinhole_cam;
   StatesGroup *state;
   StatesGroup *state_propagat;
@@ -108,7 +109,7 @@ public:
 
   double img_point_cov, outlier_threshold, ncc_thre;
   
-  SubSparseMap *visual_submap;
+  SubSparseMap *visual_submap = nullptr;
   std::vector<std::vector<V3D>> rays_with_sample_points;
 
   double compute_jacobian_time, update_ekf_time;
@@ -146,7 +147,8 @@ public:
   void retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg);
   void setImuToLidarExtrinsic(const V3D &transl, const M3D &rot);
-  void setLidarToCameraExtrinsic(vector<double> &R, vector<double> &P);
+  void setLidarToCameraExtrinsic(const vector<double> &R, const vector<double> &P);
+  void setLidarToCameraExtrinsic(const vector<double> &T_cl);
   void initializeVIO();
   void getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level);
   void computeProjectionJacobian(V3D p, MD(2, 3) & J);

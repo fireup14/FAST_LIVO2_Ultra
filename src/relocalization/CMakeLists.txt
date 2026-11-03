@@ -36,108 +36,18 @@ endif()
 include_directories(${OpenMP_INCLUDE_DIRS})
 include_directories(${EIGEN3_INCLUDE_DIR})
 
-add_executable(icp_node src/icp_node.cpp)
-ament_target_dependencies(icp_node rclcpp std_msgs  geometry_msgs  tf2 tf2_ros tf2_geometry_msgs pcl_ros )
-target_link_libraries(icp_node ${PCL_LIBRARIES})
-if(USE_LIVOX)
-  ament_target_dependencies(icp_node livox_ros_driver2)
-endif()
-
+add_library(registration_core STATIC src/teaser_gicp_node.cpp)
+ament_target_dependencies(registration_core rclcpp std_msgs sensor_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs pcl_ros livox_ros_driver2)
+target_link_libraries(registration_core teaserpp::teaser_registration teaserpp::teaser_features teaserpp::teaser_io small_gicp::small_gicp OpenMP::OpenMP_CXX ${PCL_LIBRARIES})
+foreach(node icp_node small_gicp_node teaser_node sac_ia_gicp)
+  add_executable(${node} src/${node}.cpp)
+  target_link_libraries(${node} registration_core)
+  install(TARGETS ${node} DESTINATION lib/${PROJECT_NAME})
+endforeach()
+add_executable(teaser_gicp_node src/teaser_gicp_main.cpp)
+target_link_libraries(teaser_gicp_node registration_core)
 add_executable(transform_publisher src/transform_publisher.cpp)
-ament_target_dependencies(transform_publisher rclcpp std_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs pcl_ros)
-
-
-add_executable(sac_ia_gicp
-  src/sac_ia_gicp.cpp
-)
-ament_target_dependencies(sac_ia_gicp  rclcpp  std_msgs  PCL  pcl_ros  Eigen3)
-
-
-# add small_gicp 
-add_executable(small_gicp_node src/small_gicp_node.cpp)
-
-ament_target_dependencies(small_gicp_node
-  rclcpp 
-  std_msgs 
-  sensor_msgs 
-  geometry_msgs 
-  pcl_ros 
-  Eigen3
-)
-
-# small_gicp 是一个通过 find_package 引入的现代 CMake 库，需要用 target_link_libraries 链接
-target_link_libraries(small_gicp_node 
-  small_gicp::small_gicp
-  OpenMP::OpenMP_CXX
-)
-
-if(USE_LIVOX)
-  ament_target_dependencies(small_gicp_node livox_ros_driver2)
-endif()
-
-add_executable(teaser_node src/teaser_node.cpp)
-# 包含目录
-ament_target_dependencies(teaser_node
-  rclcpp
-  std_msgs
-  sensor_msgs
-  geometry_msgs
-  tf2
-  tf2_ros
-  tf2_geometry_msgs
-  pcl_ros
-  Eigen3
-)
-target_link_libraries(teaser_node
-  teaserpp::teaser_registration
-  teaserpp::teaser_features
-  teaserpp::teaser_io
-  ${PCL_LIBRARIES}
-)
-if(USE_LIVOX)
-  ament_target_dependencies(teaser_node livox_ros_driver2)
-endif()
-
-# === TEASER + GICP 结合节点 ===
-add_executable(teaser_gicp_node src/teaser_gicp_node.cpp)
-ament_target_dependencies(teaser_gicp_node
-  rclcpp
-  std_msgs
-  sensor_msgs
-  geometry_msgs
-  tf2
-  tf2_ros
-  tf2_geometry_msgs
-  pcl_ros
-  Eigen3
-)
-target_link_libraries(teaser_gicp_node
-  teaserpp::teaser_registration
-  teaserpp::teaser_features
-  teaserpp::teaser_io
-  small_gicp::small_gicp
-  OpenMP::OpenMP_CXX
-  ${PCL_LIBRARIES}
-)
-if(USE_LIVOX)
-  ament_target_dependencies(teaser_gicp_node livox_ros_driver2)
-endif()
-
-
-
-# Install launch files
-install(
-  DIRECTORY launch rviz
-  DESTINATION share/${PROJECT_NAME}
-)
-
-# Install nodes
-install(
-  TARGETS icp_node transform_publisher sac_ia_gicp small_gicp_node # <--- 添加这个
-  DESTINATION lib/${PROJECT_NAME}
-)
-
-install(TARGETS teaser_node teaser_gicp_node
-  DESTINATION lib/${PROJECT_NAME}
-)
+ament_target_dependencies(transform_publisher rclcpp std_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs)
+install(TARGETS teaser_gicp_node transform_publisher DESTINATION lib/${PROJECT_NAME})
+install(DIRECTORY launch rviz DESTINATION share/${PROJECT_NAME})
 ament_package()

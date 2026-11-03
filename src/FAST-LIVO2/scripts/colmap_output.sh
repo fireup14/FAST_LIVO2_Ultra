@@ -1,25 +1,8 @@
-#!/bin/bash
-
-TARGET_DIRS=(
-    "$(rospack find fast_livo)/Log/Colmap/images"
-    "$(rospack find fast_livo)/Log/Colmap/sparse/0"
-)
-
-for dir in "${TARGET_DIRS[@]}"; do
-    if [ -d "$dir" ]; then
-        rm -rf "$dir"
-        echo "Removed: $dir"
-    else
-        echo "Not found: $dir"
-    fi
-done
-
-for dir in "${TARGET_DIRS[@]}"; do
-    if [ ! -d "$dir" ]; then
-        mkdir -p "$dir"
-        echo "Created: $dir"
-    else
-        echo "Exists: $dir"
-    fi
-done
-
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -ne 1 || "$1" != /* ]]; then
+  echo "Usage: colmap_output.sh /absolute/path/to/new_colmap_directory" >&2
+  exit 2
+fi
+mkdir -p -- "$1/images" "$1/sparse/0"
+echo "COLMAP directories ready: $1"

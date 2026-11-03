@@ -68,7 +68,7 @@ def _launch_setup(context):
     start_delay = LaunchConfiguration("start_delay")
 
     # Gravity-aligned localization must use mapping's final pose, after voxel initialization.
-    use_mapping_initial_pose = locate_in_prior_map and gravity_align_en
+    use_mapping_initial_pose = locate_in_prior_map
     map_odom_trans = Node(
         package="relocalization",
         executable="transform_publisher",
@@ -76,7 +76,8 @@ def _launch_setup(context):
         output="screen",
         parameters=[
             {"initial_pose_topic": "/fast_livo2/initial_map_pose" if use_mapping_initial_pose else "icp_result"},
-            {"initial_pose_transient_local": ParameterValue(use_mapping_initial_pose, value_type=bool)},
+            {"initial_pose_transient_local": True},
+            {"map_frame_id": parameters.get("publish", {}).get("map_frame_id", "map")},
         ],
     )
 
@@ -90,7 +91,7 @@ def _launch_setup(context):
             # 基础配置
             {"locate_in_prior_map": ParameterValue(locate_in_prior_map, value_type=bool)},
             {"prior_map_path": ParameterValue(prior_map_path, value_type=str)},
-            {"map_frame_id": "map"},
+            {"map_frame_id": parameters.get("publish", {}).get("map_frame_id", "map")},
             {"pcl_type": "livox"},
             # 初值换算共用建图的 LiDAR -> IMU 外参；false 模式不需要外参。
             *initial_pose_parameters,
@@ -114,11 +115,13 @@ def _launch_setup(context):
 
             # GICP 参数
             {"gicp_solver_max_iter": 50},
-            {"num_threads": 16},
+            {"num_threads": 4},
             {"max_correspondence_distance": 5.0},
             {"fitness_score_thre": 0.2},
             {"converged_count_thre": 10},
             {"registration_type": "VGICP"},
+            parameters.get("relocalization", {}),
+            {"algorithm": LaunchConfiguration("algorithm")},
         ],
     )
 
@@ -158,5 +161,7 @@ def generate_launch_description():
     return LaunchDescription([
         mapping_config_arg,
         start_delay_arg,
+        DeclareLaunchArgument("algorithm", default_value="teaser_gicp",
+                              description="teaser_gicp / teaser / gicp / icp / sac_ia_icp"),
         OpaqueFunction(function=_launch_setup),
     ])

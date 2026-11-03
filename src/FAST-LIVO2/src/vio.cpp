@@ -33,10 +33,57 @@ void VIOManager::setImuToLidarExtrinsic(const V3D &transl, const M3D &rot)
   Rli = rot.transpose();
 }
 
-void VIOManager::setLidarToCameraExtrinsic(vector<double> &R, vector<double> &P)
+namespace
 {
+void validateLidarToCameraRotation(const M3D &R)
+{
+  constexpr double tolerance = 1e-3;
+  if (!R.allFinite() ||
+      (R.transpose() * R - M3D::Identity()).norm() > tolerance ||
+      std::abs(R.determinant() - 1.0) > tolerance)
+  {
+    throw std::invalid_argument(
+        "The rotation in the LiDAR-to-camera extrinsic is not a valid rotation matrix.");
+  }
+}
+}  // namespace
+
+void VIOManager::setLidarToCameraExtrinsic(const vector<double> &R, const vector<double> &P)
+{
+  if (R.size() != 9 || P.size() != 3)
+  {
+    throw std::invalid_argument(
+        "Legacy extrin_calib.Rcl/Pcl must contain exactly 9 and 3 values.");
+  }
+
   Rcl << MAT_FROM_ARRAY(R);
   Pcl << VEC_FROM_ARRAY(P);
+  if (!Pcl.allFinite()) throw std::invalid_argument("Camera translation must be finite.");
+  validateLidarToCameraRotation(Rcl);
+}
+
+void VIOManager::setLidarToCameraExtrinsic(const vector<double> &T_cl)
+{
+  if (T_cl.size() != 16)
+  {
+    throw std::invalid_argument("extrin_calib.T_cl must contain exactly 16 values.");
+  }
+
+  for (double v : T_cl) if (!std::isfinite(v)) throw std::invalid_argument("T_cl must be finite.");
+  constexpr double tolerance = 1e-9;
+  if (std::abs(T_cl[12]) > tolerance || std::abs(T_cl[13]) > tolerance ||
+      std::abs(T_cl[14]) > tolerance || std::abs(T_cl[15] - 1.0) > tolerance)
+  {
+    throw std::invalid_argument(
+        "The last row of extrin_calib.T_cl must be [0, 0, 0, 1].");
+  }
+
+  Rcl << T_cl[0], T_cl[1], T_cl[2],
+         T_cl[4], T_cl[5], T_cl[6],
+         T_cl[8], T_cl[9], T_cl[10];
+  Pcl << T_cl[3], T_cl[7], T_cl[11];
+  if (!Pcl.allFinite()) throw std::invalid_argument("Camera translation must be finite.");
+  validateLidarToCameraRotation(Rcl);
 }
 
 void VIOManager::initializeVIO()
@@ -129,11 +176,12 @@ void VIOManager::initializeVIO()
   if(colmap_output_en)
   {
     pinhole_cam = dynamic_cast<vk::PinholeCamera*>(cam);
-    fout_colmap.open(DEBUG_FILE_DIR("Colmap/sparse/0/images.txt"), ios::out);
+    fout_colmap.open(colmap_output_dir + "/sparse/0/images.txt", ios::out);
     fout_colmap << "# Image list with two lines of data per image:\n";
     fout_colmap << "#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n";
     fout_colmap << "#   POINTS2D[] as (X, Y, POINT3D_ID)\n";
-    fout_camera.open(DEBUG_FILE_DIR("Colmap/sparse/0/cameras.txt"), ios::out);
+    if (!pinhole_cam) throw std::invalid_argument("COLMAP export currently requires a Pinhole camera.");
+    fout_camera.open(colmap_output_dir + "/sparse/0/cameras.txt", ios::out);
     fout_camera << "# Camera list with one line of data per camera:\n";
     fout_camera << "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n";
     fout_camera << "1 PINHOLE " << width << " " << height << " "
@@ -1766,7 +1814,7 @@ void VIOManager::dumpDataForColmap()
   std::ostringstream ss;
   ss << std::setw(5) << std::setfill('0') << cnt;
   std::string cnt_str = ss.str();
-  std::string image_path = std::string(ROOT_DIR) + "Log/Colmap/images/" + cnt_str + ".png";
+  std::string image_path = colmap_output_dir + "/images/" + cnt_str + ".png";
   
   cv::Mat img_rgb_undistort;
   pinhole_cam->undistortImage(img_rgb, img_rgb_undistort);
@@ -1786,11 +1834,9 @@ void VIOManager::dumpDataForColmap()
 
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
 {
+  if (img.empty()) return;
   if (width != img.cols || height != img.rows)
-  {
-    if (img.empty()) printf("[ VIO ] Empty Image!\n");
-    cv::resize(img, img, cv::Size(img.cols * image_resize_factor, img.rows * image_resize_factor), 0, 0, CV_INTER_LINEAR);
-  }
+    cv::resize(img, img, cv::Size(width, height), 0, 0, CV_INTER_LINEAR);
   img_rgb = img.clone();
   img_cp = img.clone();
   // img_test = img.clone();

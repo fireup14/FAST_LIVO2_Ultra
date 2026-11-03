@@ -149,6 +149,7 @@ public:
   int lidar_type, point_filter_num, N_SCANS, SCAN_RATE;
   
   double blind, blind_sqr;
+  bool log_points = false;
   bool feature_enabled, given_offset_time;
   std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::PointCloud2>> pub_full;
   std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::PointCloud2>> pub_surf;

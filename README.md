@@ -1,0 +1,489 @@
+# FAST_LIVO2_Ultra
+
+MID360 / MID360S + IMU 的 ROS 2 建图与先验地图定位工作空间。当前适配环境为 **Ubuntu 24.04、ROS 2 Jazzy、Livox-SDK2 1.5.2**。
+
+本文件是工程的统一操作与维护文档，合并原中英文 README、差异记录、注意事项及本地参数／重定位／SDK 说明。源代码和实际 YAML 是运行状态的依据。第三方库的许可证、上游 README 和引用资料保留在各自目录。
+
+## 1. 工程做什么
+
+| 模式 | `locate_in_prior_map` | 地图来源 | 后续操作 |
+| --- | --- | --- | --- |
+| 普通建图 | `false` | 本次实时雷达观测 | IMU 传播、去畸变、点面匹配、更新体素地图 |
+| 先验定位 | `true` | 已有 PCD + 外部配准初值 | 在固定先验体素地图中持续定位；不插入新观测，禁用地图滑动裁剪 |
+
+外部重定位用于启动时确定初始地图位姿。默认先用 TEASER++ 求粗配准，再用 small_gicp 的 VGICP 精配准。它没有替换普通建图的 LIO 算法，也不执行回环、全局图优化、RTK 融合或在线外参标定。
+
+三个入口分别启动，互不代启动：
+
+| 入口 | 命令 | 进程 |
+| --- | --- | --- |
+| 雷达驱动 | `ros2 launch livox_ros_driver2 msg_MID360_launch.py` | Livox 驱动 |
+| 建图／持续定位 | `ros2 launch fast_livo mapping_relocation.launch.py` | `laserMapping`，可选 RViz、可选图像解压 |
+| 启动重定位 | `ros2 launch relocalization relocalization.launch.py` | TF 发布器，延时启动配准器 |
+
+当前配置保留有先验模式、重力对齐开启和定位观测保存开启，先验为 `PCD/map_1102_2327.pcd`；所有本机绝对路径已指向 `/home/fire/Desktop/FAST_LIVO2_Ultra`。
+
+## 2. 获取、依赖与构建
+
+仓库本身就是 colcon 工作空间，不需要再套一层 `humble/src`：
+
+```bash
+cd /home/fire/Desktop
+git clone https://github.com/fireup14/FAST_LIVO2_Ultra.git
+cd /home/fire/Desktop/FAST_LIVO2_Ultra
+source /opt/ros/jazzy/setup.bash
+CMAKE_BUILD_PARALLEL_LEVEL=2 MAKEFLAGS=-j2 colcon build --executor sequential
+source /home/fire/Desktop/FAST_LIVO2_Ultra/install/setup.bash
+```
+
+构建使用系统 PCL、Eigen3、OpenCV、Sophus、fmt、Boost、OpenMP，以及 ROS 的 rclcpp、rclpy、cv_bridge、image_transport、pcl_ros、pcl_conversions、tf2 等依赖。Sophus 须提供当前代码使用的 `sophus/so3.hpp` 和 CMake 导出；旧 README 的 Humble 目录、`build.sh humble`、临时移出重定位包以及古老 Sophus 提交／`so2.cpp` 补丁不再是当前构建步骤。
+
+源码已包含适配版 Livox 驱动、Vikit、small_gicp、TEASER++，作为普通源码目录管理。TEASER++ 包内 `colcon.pkg` 自动开启 FPFH；不要删除此文件。TEASER++ 初次构建可能通过 FetchContent 下载上游依赖，离线环境需提前准备下载缓存。
+
+Vikit 通过 CMake/ament 导出链接，不依赖工作空间目录层级。内部算法库显式静态链接，安装后的程序不依赖构建目录中的内部 `.so`。主程序和 Vikit 不启用会改变 Eigen 分配 ABI 的 x86 `-march=native`；保留有限值检查，ARM 不使用 `-ffast-math`。
+
+已构建后，只更新算法与配置可用：
+
+```bash
+cd /home/fire/Desktop/FAST_LIVO2_Ultra
+source /opt/ros/jazzy/setup.bash
+colcon build --packages-select fast_livo relocalization
+source /home/fire/Desktop/FAST_LIVO2_Ultra/install/setup.bash
+```
+
+若修改 Vikit 或驱动，需同时重建对应依赖包；不能仅构建 fast_livo。每个运行终端均须 source 同一工作空间。不要同时 source 旧 Ultra 和本工程，否则包查找与动态库可能混用。
+
+## 3. Livox 驱动、SDK 与网口
+
+使用工程内适配驱动，版本宏为 1.2.6；仅宏相同的上游驱动不能替代本地适配。该版本包含 ROS 2 包布局、Jazzy typesupport、SDK 设备枚举兼容及 Sampling 状态修复。
+
+配套 SDK：**Livox-SDK2 1.5.2，提交 `c0796f04c143143899c87a773d9f6b7136453c0b`**，安装前缀 `/usr/local`。SDK 是系统共享依赖，不是某个工作空间的私有安装。
+
+查询已安装版本：
+
+```bash
+python3 -c 'import ctypes as c; v=(c.c_int*3)(); c.CDLL("/usr/local/lib/liblivox_lidar_sdk_shared.so").GetLivoxLidarSdkVer(v); print("Livox-SDK2 %d.%d.%d" % tuple(v))'
+```
+
+需要首次安装时，可在独立 third_party 目录下载固定版本并构建：
+
+```bash
+mkdir -p /home/fire/third_party
+git clone https://github.com/Livox-SDK/Livox-SDK2.git /home/fire/third_party/Livox-SDK2
+git -C /home/fire/third_party/Livox-SDK2 checkout --detach c0796f04c143143899c87a773d9f6b7136453c0b
+cmake -S /home/fire/third_party/Livox-SDK2 -B /home/fire/third_party/Livox-SDK2/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
+cmake --build /home/fire/third_party/Livox-SDK2/build --parallel 4
+sudo cmake --install /home/fire/third_party/Livox-SDK2/build
+sudo ldconfig
+```
+
+已有 SDK 1.5.2 时无需重复卸载。升级需先停止所有使用 SDK 的驱动，再核对旧安装清单；不要为了普通调试删除 `/usr/local` 或源码目录。原版本文档的卸载步骤是历史重装操作，不是启动前置条件。
+
+驱动配置：`src/livox_ros_driver2/config/msg_MID360.yaml`。
+
+| `lidar_model` | 配置 JSON | JSON 设备键 |
+| --- | --- | --- |
+| `mid360` | `MID360_config.json` | `MID360` |
+| `mid360s` | `MID360s_config.json` | `Mid360s` |
+
+型号忽略大小写，其他值明确报错。一次选一种型号；更换后停止原驱动再启动。两份 JSON 当前均为雷达 `192.168.2.3`、主机 `192.168.2.50`，电脑接雷达的网卡需配置对应主机地址。两台同时在线时不能共用同一设备 IP。
+
+`driver_parameters.xfer_format=1` 输出 CustomMsg，`multi_topic=0` 使用 `/livox/lidar` 与 `/livox/imu`，`publish_freq=10.0`。设备型号由驱动选择，算法里的 `lidar_type=1` 只表示 Livox CustomMsg 预处理分支。
+
+默认读取安装副本。可直接读取源码 YAML：
+
+```bash
+ros2 launch livox_ros_driver2 msg_MID360_launch.py config_file:=/home/fire/Desktop/FAST_LIVO2_Ultra/src/livox_ros_driver2/config/msg_MID360.yaml
+```
+
+设备 JSON 仍从安装目录读取，修改 JSON 后重建驱动。MID360S 支持不代表其外参可直接沿用 MID360 标定。
+
+## 4. 普通建图：两个终端
+
+编辑 `src/FAST-LIVO2/config/mapping_relocation.yaml`：
+
+```yaml
+locate_in_prior_map: false
+```
+
+保留其余配置，按需选择 `uav.gravity_align_en`。正常结束保存地图时设置 `pcd_save.pcd_save_en=true`、`interval=-1`。重新构建 fast_livo，使安装副本更新。
+
+两个终端分别先执行：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /home/fire/Desktop/FAST_LIVO2_Ultra/install/setup.bash
+```
+
+终端 1：
+
+```bash
+ros2 launch livox_ros_driver2 msg_MID360_launch.py
+```
+
+终端 2：
+
+```bash
+ros2 launch fast_livo mapping_relocation.launch.py
+```
+
+保持静止完成 IMU 初始化，再缓慢移动。纯 LIO (`common.img_en=0`) 不读取相机模型、不创建图像订阅，也不要求启动相机。普通建图不需要重定位进程和先验地图。
+
+若同时需要单位 `map → camera_init`，可额外运行关闭模式的重定位入口。它只输出单位位姿与空云，不代表真实定位成功。
+
+结束时先在终端 2 按 Ctrl+C，等待保存成功及进程正常退出，再停止驱动。强制杀进程不能保证缓存写盘。
+
+## 5. 先验定位：三个终端
+
+共享 YAML 中设置：
+
+```yaml
+locate_in_prior_map: true
+prior_map_path: "/home/fire/Desktop/FAST_LIVO2_Ultra/PCD/map_1102_2327.pcd"
+```
+
+保留 `preprocess.filter_size_map=0.1`。生成与使用同一地图时遵守重力对齐模式一致的操作约定；程序不恢复已撤销的 `prior_map_is_gravity_align` 参数，也不修改原 PCD。
+
+终端 1、2 使用上一节的驱动和建图命令。看到 `Waiting for initial pose...` 后，在已 source 本工作空间的终端 3 执行：
+
+```bash
+ros2 launch relocalization relocalization.launch.py
+```
+
+默认延时 5 秒启动配准器；可追加 `start_delay:=0.0`。延时不意味着定位已成功，不会自动启动建图。
+
+设备必须保持静止，直到建图日志显示：
+
+```text
+Published /fast_livo2/initial_map_pose after prior-map initialization; the device may now move.
+```
+
+再检查 `/fast_livo2/tracking_valid=true`、有效匹配点和静止位姿。重定位的 `LOCALIZATION SUCCESS!` 与 DDS ACK 不能代替建图初始化完成。
+
+初始化先检查地图路径、有限点、降采样及体素参数；**先验必须有实际有效平面**。没有平面就返回错误码 1，不发布最终位姿或地图 TF。定位模式禁止滑动裁剪，避免固定先验被逐渐删除。
+
+运行中约束不足时，发布无效状态，跳过本帧位姿、注册云、状态输出和地图更新。先验模式连续失败达到 `localization.max_unconstrained_frames` 后报错退出，避免无约束 IMU 漂移继续被当成正常定位。检查先验密度、初值、外参、输入时间后，重新启动建图及重定位。当前不在旧滤波状态上自动重置／重定位。
+
+结束顺序：建图 Ctrl+C 并等保存完成 → 重定位入口 → 雷达驱动。
+
+只测试外部配准时可不启动建图。提前打开 RViz，Fixed Frame 设为 `map`，添加 `/prior_map` 与 `/transformed_cloud`。此时 TF 发布器等待建图最终结果，没有 `map → camera_init` 是预期行为；两个点云本身仍可在 map 中显示。
+
+## 6. 配置读取与可选视觉启动
+
+默认两个算法入口读取安装目录同一份 `fast_livo/config/mapping_relocation.yaml`。修改源码 YAML 后须构建并重启，或让两个入口显式读取同一个源码文件：
+
+```bash
+ros2 launch fast_livo mapping_relocation.launch.py config_file:=/home/fire/Desktop/FAST_LIVO2_Ultra/src/FAST-LIVO2/config/mapping_relocation.yaml enable_rviz:=false
+```
+
+```bash
+ros2 launch relocalization relocalization.launch.py config_file:=/home/fire/Desktop/FAST_LIVO2_Ultra/src/FAST-LIVO2/config/mapping_relocation.yaml
+```
+
+两个 launch 不会相互传递参数，也不热更新。可以用 `ros2 pkg prefix fast_livo` 确认当前包来源。
+
+启用视觉需 `common.img_en=1`，启动外部相机，核对时间、图像话题、内参、外参及分辨率。相机 YAML 默认是 D405 640×360 的历史标定，不应当作所有设备的通用标定。
+
+相机参数支持 `camera.model/width/height/fx/...` 与 `cam_model/cam_width/cam_fx/...` 别名，并可由 YAML 或 ROS 命令行覆盖。缺失必需内参立即报错；不再反复查询同一份不完整参数。图像会按相机模型的目标尺寸调整，空图像与转换失败被丢弃。
+
+外参优先接受按行排列的 4×4 `extrin_calib.T_cl`，最后一行必须为 `[0,0,0,1]`；未提供时使用旧 `Rcl/Pcl`。矩阵长度、有限性、正交性、行列式和平移都经过检查。视觉噪声及离群阈值接受整数或浮点值。
+
+仅有压缩图像时可启用可选解压：
+
+```bash
+ros2 launch fast_livo mapping_relocation.launch.py republish_compressed:=true use_respawn:=true
+```
+
+输入为 `common.img_topic + /compressed`，输出为 `common.img_topic` 的原始 Image；不同输入基话题可用 `image_input_topic:=/your/input`。需要 image_transport 的 compressed 插件；若 raw 话题已有发布者，不要重复转发。`use_respawn` 只控制解压进程，间隔 2 秒、最多重试 5 次，不重启滤波器，不检测算法丢失。纯 LIO 下开启解压会明确报错。
+
+## 7. 坐标系与重力数学约定
+
+`T_A_B` 将 B 系点转换到 A 系。L 是雷达，I0 是初始 IMU，I(t) 是当前 IMU，C 是固定局部系 `camera_init`，M 是原先验 `map`。
+
+```text
+E = T_imu_lidar                     p_imu = R * p_lidar + t
+F = T_map_lidar                     原始点云配准结果
+P = T_map_I0 = F * inverse(E)        /icp_result
+A = T_camera_init_I0                本次初始化实际重力旋转；关闭对齐时为 I
+B = T_map_camera_init = P * inverse(A)
+先验：p_camera_init = inverse(B) * p_map
+实时：p_camera_init = T_camera_init_imu(t) * E * p_lidar(t)
+全局位姿：T_map_imu(t) = B * T_camera_init_imu(t)
+```
+
+`imu.gravity_est_en` 控制重力状态估计耦合；`uav.gravity_align_en` 控制初始化后一次性旋转局部参考系，让重力沿负 Z。关闭后仍做 IMU 重力补偿；开启不提供绝对 yaw。两次都开启也不能省掉本次 A，因为设备启动姿态可能不同。
+
+配准器内部、手动 `/initialpose` 及对齐调试云保持雷达位姿语义；`/icp_result` 已换算为 IMU 位姿，不要重复补外参。建图用自己实际的 A 计算 B，并在先验有效平面初始化成功后才发布最终 B。
+
+现在所有有先验模式的 TF 都等待建图最终结果，重力开关不影响这项就绪约束。TF 发布器校验 frame、有限位置和四元数，并固定首个有效结果。
+
+## 8. 话题、时间戳与可靠性
+
+| 话题 | 类型／坐标 | 说明 |
+| --- | --- | --- |
+| `/livox/lidar` | CustomMsg，雷达系 | 驱动 → 建图、配准器 |
+| `/livox/imu` | Imu，IMU 系 | 驱动 → 建图 |
+| `/initialpose` | PoseWithCovarianceStamped，map | 人工雷达位姿，进入精配准 |
+| `/icp_result` | PoseWithCovarianceStamped，map | 初始 IMU 位姿 P；Reliable + Transient Local，depth=1 |
+| `/fast_livo2/initial_map_pose` | 同上，map | 最终局部系位姿 B；Reliable + Transient Local，depth=1 |
+| `/tf_static` | map → camera_init | TF 发布器常驻维护 |
+| `/aft_mapped_to_init` | Odometry，camera_init / aft_mapped | 测量时间的局部 IMU 位姿、机体系 twist 和协方差 |
+| `/aft_mapped_in_map` | Odometry，map / aft_mapped | 同一测量时刻的全局 pose；旋转 pose 协方差，twist 保持 child frame |
+| `/cloud_registered` | PointCloud2，camera_init | 本次观测，不是始终处于当前机体系 |
+| `/cloud_effected` | PointCloud2，camera_init | 有效点面匹配点，仅受显示开关控制 |
+| `/Laser_map` | PointCloud2，camera_init | 内存中换系后的先验，已修正 frame 标签 |
+| `/planes` | MarkerArray，camera_init | 持久 ID、完整快照、限频发布；清理旧标记 |
+| `/prior_map` | PointCloud2，map | 配准用地图；Transient Local，发布者存活期间保留 |
+| `/transformed_cloud` | PointCloud2，map | 配准调试结果，提前订阅 |
+| `/fast_livo2/tracking_valid` | Bool，Transient Local | 约束更新是否有效；启动及丢失时为 false |
+| `/fast_livo2/state6` | Float32MultiArray | 兼容原接口：机体系去偏角速度 3 维 + 世界负 Z 单位向量在机体系的投影 3 维 |
+| `/fast_livo2/state6_stamped` | fast_livo/State6Stamped | 新接口，包含测量时间、机体系 frame、两向量和 valid |
+| `/fast_livo2/state6_imu_prop[_stamped]` | 对应原始／新消息 | 高频外推状态，需开启 `imu_rate_odom` |
+| `/LIVO2/imu_propagate` | Odometry，camera_init / aft_mapped | IMU 外推；有效频率由输入决定，不保证恒定 250 Hz |
+
+Odometry 的 pose 在 header.frame_id 中，twist 在 child_frame_id 中。因此将局部 pose 转换到 map 时，不能把已经在机体系表达的 twist 再旋转一次。全局 TF 按里程计测量时间查询；静态 B 在所有测量时刻有效。初始配准协方差仍是占位近似，没有被当作额外滤波观测；全局输出协方差条件于该固定 B，不包含全局配准自身的不确定性。
+
+先验初值到来前根本不创建传感器订阅，避免 DDS 累积旧输入。接受有效初值后才订阅：雷达深度 10、IMU 200、图像 5，使用 SensorDataQoS。IMU 时间修正为 `消息时间 - imu_time_offset`，图像为 `消息时间 + img_time_offset + exposure_time_init`。IMU 大于 0.2 秒前跳会告警并推进时间水位，后续消息可以恢复。
+
+成功配准后等待最多 2 秒 DDS ACK，并保留结果 `result_hold_seconds`（默认 5 秒），然后退出求解进程。保留期间，采用 Transient Local 的晚加入订阅者可以接收结果；发布者退出后不永久保留。仍推荐先启动建图。ACK 只表示传输确认，不表示 IMU／体素初始化完成。
+
+## 9. 保存、命名与坐标选择
+
+有效保存条件：
+
+```text
+pcd_save.pcd_save_en && (!locate_in_prior_map || pcd_save.save_in_localization)
+```
+
+禁用时不创建 PCD 输出目录、不累积保存缓存、不写 PCD 和位姿记录。独立重定位进程始终只读先验。保存本次观测不意味着更新、复制或合并先验。
+
+| `pcd_save.type` | 保存坐标 | 用途 |
+| --- | --- | --- |
+| `0` | 局部 camera_init | 默认地图与本次观测 |
+| `1` | 每一帧自己的 IMU 系 | 离线逐帧处理；运动时不能把这些点直接叠成一张地图 |
+| `2` | 先验 map；无先验时回退 camera_init | 在原先验坐标中保存本次观测，应用一次 B |
+
+所有输出写入绝对 `pcd_save.output_dir`，自动创建目录。启动用系统本地时间固定 `map_MMDD_HHMM` 前缀，与 ROS `/clock` 无关；跨分钟、跨日不改名。同分钟重启可能覆盖同名文件，保留既定覆盖约定，不删除其他地图。
+
+| 条件 | 文件 |
+| --- | --- |
+| `interval<0`，正常退出 | `map_MMDD_HHMM.pcd` |
+| `interval>0`，达到处理帧数 | `map_MMDD_HHMM_0001.pcd`、`_0002.pcd`… |
+| 正数间隔退出时还有缓存 | `map_MMDD_HHMM_remainder.pcd`，现在会补存尾部 |
+| RGB 整图／尾部保存 | 另有 `_downsampled.pcd`，使用 `filter_size_pcd` |
+| 分段位姿 | `map_MMDD_HHMM_scans_pos.txt`，每段一行 `x y z qw qx qy qz` |
+| 运行元数据 | `map_MMDD_HHMM_metadata.yaml`，坐标类型、重力开关、定位模式及 B |
+
+`interval` 是保存调用／处理帧数，不是秒；0 被拒绝，关闭保存使用总开关。纯 LIO 保存保留强度，不另外按 `filter_size_pcd` 降采样。写盘错误会报错，不打印虚假的保存成功。整图累计内存随观测增加，长时间采集宜使用分段保存。
+
+独立图像保存使用 `image_save.img_save_en/interval/output_dir`，需要开启视觉，与 PCD 总开关独立。COLMAP 导出需要视觉、Pinhole 模型、有效 PCD 保存及 `type=0`；输出到当前会话的 `_colmap` 子目录，使用 filesystem 创建，不运行 ROS1 命令，不清空其他会话。
+
+### 系统时间检查
+
+`time_check.enabled=true` 默认只读调用 Linux `adjtimex(modes=0)`。系统未报告同步、有时钟错误或查询失败，建图以错误码 1 退出，尚不接收传感器。检查不会联网校时、等待同步或修改系统时间；它也不检查传感器时钟一致性。回放或隔离测试可显式关闭，但会提示命名时间未经校验。独立雷达与配准节点不受该开关控制。
+
+## 10. 配准算法、参数与性能
+
+保留五个可执行名，并共用同一份校验、坐标转换、QoS、成功收尾和资源限制实现，避免旧接口互相漂移：
+
+| 可执行程序／`algorithm` | 算法 | 初值 |
+| --- | --- | --- |
+| `teaser_gicp_node`／`teaser_gicp` | TEASER++ → GICP/VGICP | 自动粗配准，也接受手动初值 |
+| `small_gicp_node`／`gicp` | GICP/VGICP | 接近真值的初值，默认单位变换 |
+| `icp_node`／`icp` | PCL ICP | 接近真值的初值 |
+| `teaser_node`／`teaser` | TEASER++ 粗配准 | 自动特征匹配，精度按场景验证 |
+| `sac_ia_gicp`／`sac_ia_icp` | SAC-IA → PCL ICP | 自动粗配准；历史可执行名兼容保留，实际精配准是 ICP |
+
+统一 launch 选择算法：
+
+```bash
+ros2 launch relocalization relocalization.launch.py algorithm:=sac_ia_icp
+```
+
+不要再使用已删除的 old/example 启动文件。直接 `ros2 run` 启动节点时，须使用当前 `prior_map_path`、模式和外参参数；原 `map_path/target_pcd_file` 等分裂接口已被统一。标准点云可在共享 YAML 的 `relocalization.pcl_type` 设为 `standard`，输入 `/pointcloud2`；默认 Livox 输入为原始雷达点，不能用改话题名称把 CustomMsg 当成 PointCloud2，也不要把已经注册到世界系的点云重复当原始雷达云。
+
+| 配准参数 | launch 默认值 | 含义 |
+| --- | --- | --- |
+| `map_voxel_leaf_size / cloud_voxel_leaf_size` | 0.4 / 0.4 m | 粗配准地图／实时云降采样 |
+| `gicp_map_voxel_leaf_size / gicp_cloud_voxel_leaf_size` | 0.2 / 0.1 m | 精配准地图／实时云降采样 |
+| `fpfh_normal_radius / fpfh_feature_radius` | 0.8 / 1.2 m | 法线／描述子半径，后者须更大 |
+| `noise_bound` | 0.3 m | TEASER 噪声范围；SAC-IA 最小采样距离 |
+| `teaser_solver_max_iter / rotation_gnc_factor` | 100 / 1.4 | 粗配准迭代上限及 GNC 因子 |
+| `teaser_inlier_threshold / teaser_success_count` | 5 / 3 | 平移内点数下限及连续成功次数 |
+| `gicp_solver_max_iter` | 50 | 现在实际传给精配准器的迭代上限 |
+| `registration_type` | VGICP | GICP 或 VGICP |
+| `max_correspondence_distance` | 5.0 m | 对应点搜索距离 |
+| `fitness_score_thre` | 0.2 | 均方距离分数阈值，越小越严格 |
+| `converged_count_thre` | 10 | 现在恰好连续 10 次合格后成功，使用 `>=` |
+| `num_threads` | 4 | 配准及 OpenMP 线程数 |
+| `max_attempts / timeout_seconds` | 300 / 120 s | 输入帧尝试上限／整个任务时间预算 |
+| `result_hold_seconds` | 5 s | 成功消息保留期，随后退出 |
+
+共享 YAML 的 `relocalization` 子节可覆盖这些配准参数。关闭模式不加载地图、计算特征或创建输入订阅，1 Hz 输出单位位姿与空云，轻量常驻。
+
+真实配准不是“只计算一次”。地图加载、FPFH、匹配、鲁棒求解和 GICP 都可能占用大量 CPU／内存。失败可回退重试，但现在有预算上限；单次库调用不能中途被计时器抢占，因此时间预算在回调／库调用边界检查，不能当作硬实时强制中断。
+
+旧 16 线程满载对应 top 约 1600% 只是显示换算，不是实测。本版本默认 4 线程；不要据此声称实机峰值或精度已测量。可用 `pidstat -u -r -C teaser_gicp 1` 结合 LIO 耗时观察。先确认地图和有效约束，再调整阈值，不应只为得到成功日志而放宽匹配门限。
+
+## 11. 全部配置参数
+
+下表由当前 YAML 与代码消费关系核对。当前值不一定等于 C++ 缺省值。单位说明保留 `dept_err`、`patch_pyrimid_level` 等既有接口拼写。
+
+| 参数 | 当前值 | 含义 |
+| --- | --- | --- |
+| `locate_in_prior_map` | `true` | `false`：使用实时点云初始化并更新体素地图；`true`：加载先验地图，并利用外部 `/icp_result` 初值进行先验地图定位，后续不插入实时观测更新体素地图。由 FAST-LIVO2 节点判断，不会自动启动外部重定位节点。 |
+| `prior_map_path` | `"/home/fire/Desktop/FAST_LIVO2_Ultra/PCD/map_1102_2327.pcd"` | 先验 PCD 地图文件路径，只在定位模式加载；普通建图允许为空。定位时应填写实际可读的绝对路径；建图遇到空路径、读取失败、空地图或非有限 XYZ 会报错并返回 1。两个默认入口直接读取本文件中的同一项，无需在重定位命令中重复填写。 |
+| `time_check.enabled` | `true` | FAST-LIVO2 启动时只读检查 Linux 系统时钟同步状态。未同步、时钟异常或查询失败时立即打印原因并以错误码 1 退出，不创建输出文件、不订阅传感器或进入建图。关闭时打印“时间校验已关闭”，允许使用未经校验的当前系统时间继续运行。代码默认值也为 `true`。 |
+| `common.img_topic` | `"/camera/camera/color/image_raw"` | 原始 sensor_msgs/Image 话题；仅 img_en=1 时创建订阅。不会启动相机。 |
+| `common.lid_topic` | `"/livox/lidar"` | 雷达输入话题。当前 `lidar_type=1` 时使用 `livox_ros_driver2/msg/CustomMsg`，需要驱动输出类型匹配。 |
+| `common.imu_topic` | `"/livox/imu"` | IMU 输入话题，消息类型为 `sensor_msgs/msg/Imu`。 |
+| `common.img_en` | `0` | 整数开关，0 关闭视觉观测，1 启用视觉；不是 `locate_in_prior_map` 的同义开关。启用视觉时还需有效图像、相机内参、外参和时间对齐。 |
+| `common.lidar_en` | `1` | 整数开关，1 启用雷达输入。与图像、IMU 开关共同影响节点模式选择；当前组合进入 LIO 分支。不能据此认为任意关闭传感器的组合都已验证。 |
+| `common.ros_driver_bug_fix` | `false` | 针对驱动时间戳整秒错位的兼容处理。启用后，IMU 回调会将时间加上 `round(最近雷达时间 − IMU时间)` 秒；不是通用时间同步、硬件同步或连续偏移标定。当前保持关闭。 |
+| `extrin_calib.extrinsic_T` | `[-0.011, -0.02329, 0.04412]` | LiDAR 到 IMU 的平移，表示雷达原点在 IMU 系中的位置，单位 m，参与点云运动补偿和坐标变换。定位模式也供重定位节点进行初值换算，要求 3 个有限数值。 |
+| `extrin_calib.extrinsic_R` | `长度 9，见 YAML` | LiDAR 到 IMU 的旋转矩阵，9 个数按行排列；不能直接填欧拉角。定位模式也供重定位初值换算，并校验有限值、正交性及行列式 +1（容差 `1e-6`）。 |
+| `extrin_calib.Rcl` | `长度 9，见 YAML` | LiDAR 到相机的旋转矩阵，9 个数按行排列，用于投影与视觉几何计算。当前关闭视觉，不参与实时视觉观测更新。 |
+| `extrin_calib.Pcl` | `[0.031768816365067, -0.108594539194672, 0.016584619676391]` | LiDAR 到相机的平移，单位 m；与 `Rcl` 配套使用。当前关闭视觉，不参与实时视觉观测更新。 |
+| `time_offset.imu_time_offset` | `0.0` | IMU 时间偏移，秒；实际使用消息时间减去本值。 |
+| `time_offset.img_time_offset` | `0.1` | 图像时间偏移，单位 s；代码使用 `图像消息时间 + img_time_offset`，正值使参与同步的图像时刻后移。当前关闭视觉，不参与实时图像融合。 |
+| `time_offset.exposure_time_init` | `0.0` | 在图像同步分支中继续加到图像时刻上的时间修正，单位 s，即捕获时刻按 `消息时间 + img_time_offset + exposure_time_init` 使用。它不设置相机硬件曝光，也不是逆曝光状态的初始数值。当前关闭视觉。 |
+| `preprocess.lidar_type` | `1` | 雷达数据处理类型。当前枚举值 1 对应代码中的 `AVIA`／Livox CustomMsg 分支，本工程也用该分支处理当前 MID360 数据；它不是驱动 JSON 中的设备型号选择。 |
+| `preprocess.scan_line` | `4` | 允许的扫描线数量；当前 Livox 处理会保留 `point.line < 4` 的点，并据此组织扫描线缓存。不控制雷达输出频率。 |
+| `preprocess.scan_rate` | `10` | 预处理中的扫描频率参数，单位 Hz。部分标准旋转雷达分支用它推算点时间；**当前 Livox 分支使用点的 `offset_time`，不使用此值推算时间**。修改它不会改变 Livox 驱动的发布频率。 |
+| `preprocess.blind` | `0.6` | 最小点距离，单位 m；当前处理将距离小于 0.6 m 的近点剔除。 |
+| `preprocess.point_filter_num` | `3` | 均匀抽样间隔。当前关闭特征提取时，对通过扫描线条件的点计数，每 3 个取 1 个，再检查盲区；不是每三帧取一帧。 |
+| `preprocess.filter_size_surf` | `0.1` | 实时点云体素降采样边长，单位 m，供 LIO 匹配／地图更新的点云使用。调大通常减少点数及计算量，同时减少几何细节。 |
+| `preprocess.filter_size_map` | `0.1` | 加载先验 PCD 时使用的体素降采样边长，单位 m；先验加载时要求转换为滤波器使用的浮点数后仍为有限正数，否则建图报错退出。当前值已由用户改为 0.1，解决旧图在 0.5 下过稀、无法建立有效平面的问题。普通建图模式不加载先验地图；实时体素地图分辨率由 `lio.voxel_size` 控制。独立重定位使用其 launch 中的两阶段降采样参数，不读取本项。 |
+| `preprocess.feature_extract_enabled` | `false` | 是否走预处理中的扫描线几何特征提取分支。当前关闭，使用筛选、抽样后的点云；不代表后面的 LIO 不使用平面几何约束。 |
+| `vio.max_iterations` | `5` | 视觉迭代优化的最大迭代次数，图像金字塔各层按此上限优化，满足停止条件时可提前结束。与 LIO 的迭代次数独立。 |
+| `vio.outlier_threshold` | `1000` | 浮点光度离群阈值；与 patch_size² 相乘，比较块内残差平方和。 |
+| `vio.img_point_cov` | `1000` | 浮点光度观测噪声权重；增大降低视觉观测相对先验的权重。接受旧整数 YAML。 |
+| `vio.patch_size` | `8` | 图像块边长，单位像素；当前每块为 8×8，共 64 个采样像素。块越大通常计算越多。 |
+| `vio.patch_pyrimid_level` | `4` | 图像块金字塔层数，当前使用层号 0～3。`pyrimid` 是现有代码实际读取的拼写，不能自行改成 `pyramid`。 |
+| `vio.grid_size` | `5` | 图像网格尺寸控制参数；**只有大于 10 时才直接按像素边长使用**。当前 5 走另一分支，以 `图像高度 / grid_n_height` 重新计算边长，不等于使用 5 像素网格。 |
+| `vio.grid_n_height` | `17` | 当前上述分支中的纵向网格数量参考值。以当前相机高度 360 计算，整数网格边长为 `360 / 17 = 21` 像素，代码再计算网格数量；若 `grid_size > 10`，此值则被重新计算。 |
+| `vio.normal_en` | `true` | 在视觉图像块变换／参考观测处理中使用平面法向几何信息。它不是 IMU 重力估计开关。 |
+| `vio.raycast_en` | `false` | 是否启用视觉地图检索中的射线采样补充流程，用于寻找投影网格对应的地图点。不是控制雷达发射或驱动功能。 |
+| `vio.inverse_composition_en` | `false` | 是否采用反向组合的视觉优化分支；当前使用常规前向计算分支。不改变外参矩阵的定义方向。 |
+| `vio.exposure_estimate_en` | `true` | 允许估计视觉光度模型中的逆曝光／亮度尺度状态，并启用对应传播噪声。不是相机驱动的自动曝光开关；当前没有视觉观测，因此不进行视觉曝光校正。 |
+| `vio.inv_expo_cov` | `0.1` | 逆曝光状态的过程噪声系数，传播时按 `inv_expo_cov × dt²` 加入相关协方差。不是实际曝光时间，当前会传入 IMU 传播模块。 |
+| `imu.imu_en` | `true` | 启用 IMU 处理、状态传播与点云运动补偿。当前普通建图为 LiDAR + IMU。 |
+| `imu.gravity_est_en` | `true` | 启用滤波传播／估计中的重力状态耦合。与初始化后旋转局部参考系的 `uav.gravity_align_en` 不同；关闭该项也不等于跳过初始 IMU 均值与重力初始化。 |
+| `imu.ba_bg_est_en` | `true` | 启用加速度计和陀螺仪偏置状态与运动状态之间的估计耦合；不是读取设备出厂标定的开关。 |
+| `imu.imu_int_frame` | `30` | 初始化计数阈值。虽然名称和接口写 frame，当前 `IMU_init()` 对每条 IMU 样本递增计数，超过阈值后结束初始化；不是固定等待 30 帧雷达，也不是 30 秒。 |
+| `imu.acc_cov` | `0.1` | 加速度计测量噪声协方差系数，三个轴使用相同值；按实现参与状态传播噪声。代码直接使用该系数，不应把它不加区分地当成标准差。 |
+| `imu.gyr_cov` | `0.1` | 陀螺仪测量噪声协方差系数，三个轴使用相同值；影响旋转等状态的传播不确定度，同样不是直接指定角速度。 |
+| `imu.b_acc_cov` | `0.0001` | 加速度计偏置随机游走噪声，实际传给 IMU 模块；要求有限非负。 |
+| `imu.b_gyr_cov` | `0.0001` | 陀螺仪偏置随机游走噪声，实际传给 IMU 模块；要求有限非负。 |
+| `lio.max_iterations` | `5` | 单次 LIO 迭代状态更新的最大迭代次数，允许按收敛／重匹配条件提前结束。声明、读取与 YAML 现已统一使用此名。 |
+| `lio.min_effective_points` | `6` | 每次 LIO 更新的最少有效点面约束数；不足则返回无效，不做伪更新。 |
+| `lio.dept_err` | `0.02` | 点测距方向的误差尺度，单位 m；构建点协方差时使用其平方。`dept_err` 是当前接口实际拼写。 |
+| `lio.beam_err` | `0.05` | 光束方向角误差尺度，单位为**度**，代码先转弧度，再以正弦平方构造方向方差；不是 0.05 rad。 |
+| `lio.min_eigen_value` | `0.0025` | 点位置协方差最小特征值的平面阈值，m²；还拒绝零面积／线状几何及不稳定特征值间隔。 |
+| `lio.sigma_num` | `3.0` | 点到平面残差的标准差门限倍数，无量纲；代码采用 `距离 < sigma_num × sqrt(残差方差)` 筛选匹配。不是固定 3 m 的距离阈值。 |
+| `lio.voxel_size` | `0.5` | 顶层地图体素边长，单位 m；体素初始化时要求为有限正数。体素内可以继续八叉树细分，不等同于实时点云降采样边长。 |
+| `lio.max_layer` | `2` | 八叉树允许的最大深度，要求非负且 `layer_init_num` 长度覆盖到该层，否则体素初始化报错退出。顶层编号为 0，因此可使用 0、1、2 层；对应边长约为 0.5、0.25、0.125 m。不是只有两个层级。 |
+| `lio.max_points_num` | `50` | 单个体素树节点用于平面拟合／更新的点数上限控制；达到相关条件后会停止该平面节点更新并释放点缓存。不是整张地图只能保留 50 点，也不是全局内存限制。 |
+| `lio.layer_init_num` | `长度 5，见 YAML` | 各深度节点初始化拟合的点数阈值列表，从第 0 层开始对应；当前最大层为 2，仅用前 3 项。代码在点数超过阈值时初始化，例如阈值 5 通常需要至少 6 点。列表长度须至少为 `max_layer + 1`，初始化时检查，避免空列表或深层索引越界。 |
+| `local_map.map_sliding_en` | `false` | 普通建图时允许滑动裁剪；先验定位启动时强制关闭并告警，保留固定先验。 |
+| `local_map.half_map_size` | `100` | 保留区域在每个坐标轴方向的半宽，代码单位是**顶层体素索引格数**。当前 `voxel_size=0.5 m` 时约相当于各方向半宽 50 m，存在索引取整／边界差异；不是半宽 100 m。仅滑动开启时使用。 |
+| `local_map.sliding_thresh` | `8.0` | 当前位置相对上次滑动位置的移动距离阈值，单位 m；达到阈值才执行下一次裁剪。不是剩余地图边缘距离。当前滑动关闭，不生效。 |
+| `uav.imu_rate_odom` | `false` | 是否在滤波更新之间利用 IMU 继续外推并发布额外里程计／状态。代码以 0.004 s 定时回调尝试发布 `/LIVO2/imu_propagate` 和 `/fast_livo2/state6_imu_prop`，实际有效输出依赖 IMU 数据。关闭时保留正常 LIO 输出；不是关闭 IMU。 |
+| `uav.gravity_align_en` | `true` | IMU 初始化后只执行一次重力对齐，使局部系重力指向负 Z。要求 `imu.imu_en=true`，否则启动报错；关闭不等于不估计重力，也不提供绝对航向。先验模式用实际旋转 A 补偿最终地图初值，体素地图构建成功后才发布最终位姿供 TF 使用；无先验模式直接保留原有重力对齐建图流程。两种模式均需静止初始化。 |
+| `publish.dense_map_en` | `true` | 注册点云输出选用去畸变后的较稠密实时点云；为 `false` 时选用体素降采样后的点云。它不改变内部体素地图分辨率，但会影响消息量和后续 PCD 缓存点数。 |
+| `publish.pub_effect_point_en` | `false` | 是否发布参与点到平面匹配的有效点 `/cloud_effected`，用于调试；不控制算法是否使用这些点。 |
+| `publish.pub_plane_en` | `true` | 是否显示有效体素平面 Marker；不控制平面拟合或 LIO 几何约束。 |
+| `publish.plane_publish_period` | `0.2` | 平面 Marker 完整快照最短发布间隔，秒；不再在算法线程中 sleep。 |
+| `publish.pub_scan_num` | `1` | 视觉 RGB 点云分支在着色前累积的发布调用次数，当前为每次处理。不能把它当成所有消息的通用发布降频参数；纯 LIO 不走该累积着色分支。 |
+| `publish.blind_rgb_points` | `0.0` | RGB 点云着色／输出时相对相机的最小距离，单位 m。仅视觉着色分支使用，与雷达预处理盲区独立；仍会检查点在相机前方且位于图像内。 |
+| `publish.map_frame_id` | `"map"` | 先验／全局位姿的目标 frame，默认 map；两个算法入口及 TF 发布器使用同一值。 |
+| `evo.seq_name` | `"Mid360_D405_Mapping_01"` | 轨迹文本的文件名主体，启用输出后对应源码包下 `Log/result/Mid360_D405_Mapping_01.txt`；不是 ROS 节点名或地图坐标系。 |
+| `evo.pose_output_en` | `false` | 是否输出供轨迹评估使用的文本，字段为时间、位置和四元数 `qx qy qz qw`。不控制 ROS 里程计／路径发布，也不会自动运行 evo 或计算误差。 |
+| `pcd_save.pcd_save_en` | `true` | PCD 保存总开关；先验模式还需 save_in_localization=true。保存本次观测，不合并先验。 |
+| `pcd_save.type` | `0` | 0=局部 camera_init；1=各帧 IMU 坐标；2=先验 map（无先验时为局部系）。 |
+| `pcd_save.save_in_localization` | `true` | 允许先验定位保存本次观测；普通建图不受此开关影响。代码缺省 false，当前 YAML 为 true。 |
+| `pcd_save.output_dir` | `"/home/fire/Desktop/FAST_LIVO2_Ultra/PCD"` | 非空绝对输出目录，启用时自动创建；PCD、TXT 分段位姿、元数据和会话 COLMAP 输出均使用此目录。 |
+| `pcd_save.colmap_output_en` | `false` | Pinhole 视觉 COLMAP 导出；要求有效 PCD 保存且 type=0，输出到独立会话目录。 |
+| `pcd_save.filter_size_pcd` | `0.15` | RGB 整图／尾部降采样附图边长，米；不对纯 LIO 强度整图再次降采样。 |
+| `pcd_save.interval` | `-1` | 负数正常退出保存整图；正数按调用／处理帧数分段并在退出补存尾部；0 被拒绝。 |
+| `log.sensor` | `false` | 雷达／IMU／图像时间及预处理点数日志；false 时关闭高频 INFO。 |
+| `log.lio` | `false` | LIO 特征、地图更新日志与调试状态文本；告警独立保留。 |
+| `log.timing` | `false` | 逐帧 LIO 阶段耗时表。 |
+| `log.map_sliding` | `false` | 普通建图滑动阈值、裁剪数量和耗时日志。 |
+| `localization.max_unconstrained_frames` | `5` | 先验模式连续约束不足的帧数上限；达到后错误退出，需要核查并重启。 |
+| `image_save.img_save_en` | `false` | 独立图像保存开关；要求 img_en=1，不依赖 PCD 总开关。 |
+| `image_save.interval` | `1` | 每隔多少次图像／RGB 发布调用保存图像，正整数。 |
+| `image_save.output_dir` | `"/home/fire/Desktop/FAST_LIVO2_Ultra/images"` | 图像保存绝对目录，启用时自动创建。 |
+| `relocalization.num_threads` | `4` | 配准器和 OpenMP 线程数，正整数；默认从 16 收敛为 4。 |
+| `relocalization.max_attempts` | `300` | 真实配准输入帧尝试次数上限，正整数。 |
+| `relocalization.timeout_seconds` | `120.0` | 真实配准总时间预算，秒；在库调用／回调边界检查。 |
+| `relocalization.result_hold_seconds` | `5.0` | 成功结果以 Transient Local 保留的秒数；随后退出求解器。 |
+
+可选 `extrin_calib.T_cl` 是长度 16 的按行排列矩阵；省略时读取 Rcl/Pcl。相机文件的 `camera.model/width/height/scale/fx/fy/cx/cy/d0/d1/d2/d3` 分别为模型、目标图像尺寸、比例、焦距、主点和畸变参数；焦距和主点单位像素。当前 Pinhole 640×360、scale=1.0，实际内参见 `camera_parameter.yaml`。
+
+关键区别：先验 `filter_size_map`、实时 `filter_size_surf`、内部 `lio.voxel_size`、RGB 输出 `filter_size_pcd` 是四个不同尺度。平面发布开关不关闭几何拟合。`half_map_size` 单位是根体素索引格数，0.5 m 体素时 100 约为半宽 50 m。`imu_int_frame` 在实现中按 IMU 样本累加，不是等待 30 帧雷达。
+
+## 12. 离线工具
+
+### COLMAP 目录工具
+
+```bash
+ros2 run fast_livo colmap_output.sh /absolute/path/to/new_colmap_directory
+```
+
+只创建 images 和 sparse/0，保留既有文件，不依赖 rospack，不删除旧数据。正常视觉导出由建图原生创建会话目录，无需先运行此工具。
+
+### 网格融合
+
+```bash
+ros2 run fast_livo mesh.py /absolute/path/to/per_scan_pcd --poses /absolute/path/to/poses.txt --input-frame world --output /absolute/path/to/mesh.ply
+```
+
+可选 `--voxel-size`、`--sdf-trunc`、`--min-weight` 和 `--preview`。依赖 NumPy、SciPy、Open3D、VDBFusion；它不是 LIO 或 PCD 保存的前置依赖。
+
+输入按文件名字典序排序，每个 PCD 必须有对应的 `x y z qw qx qy qz` 传感器位姿。world 输入已经在同一世界系；body 输入先应用对应姿态。传给 VDBFusion 的是世界系点和三维传感器原点，不能拿单位 4×4 矩阵替代真实观测原点。[VDBFusion API 约定](https://github.com/PRBonn/vdbfusion#usage)
+
+不要把累积的整图或包含多帧、多观测原点的分段云，当作有精确单一视点的一帧扫描；若需要可靠 TSDF 重建，应采集逐帧点云及对应位姿。缺少真实姿态时程序拒绝静默使用全单位位姿。
+
+Vikit Python 包已改为 setuptools / ament_python，`RosNode` 使用 `ros2 run`、点号参数与字面量 argv，不执行拼接 shell；CPU 信息按 Python 3 文本读取，深度图异常类型已补全。
+
+## 13. 故障定位与历史依据
+
+| 现象 | 检查与处理 |
+| --- | --- |
+| 启动提示时间校验失败 | 检查系统同步状态；回放／测试时显式关闭 time_check，不修改传感器时间参数来绕过系统时间问题 |
+| 等不到初值 | 检查模式、共享 YAML、/icp_result QoS、两个进程所在 ROS_DOMAIN_ID；保持静止并先启动建图 |
+| 提示 zero valid planes | 首先确认先验 filter_size_map=0.1 和地图几何；不要把“有体素”误认为“有可用平面” |
+| 配准成功后定位无效 | 检查有效点、初值 IMU 语义、外参及先验密度；ACK 不是持续匹配正常的证明 |
+| 没有 map 系里程计 | 检查最终建图初值和 TF 发布器；普通建图缺少 map TF 时局部输出仍可正常工作 |
+| 找不到 small_gicp / TEASER 特征目标 | 首次完整构建，保留 teaserpp 的 colcon.pkg，确认 source 当前安装空间 |
+| Livox SDK 动态库缺失 | 检查固定版本安装、`ldconfig -p`、/usr/local/lib 与程序动态链接，勿混用其他工作空间库 |
+| compressed 插件缺失 | 安装当前 ROS 发行版的 compressed image transport 插件，仅视觉解压需要 |
+| 保存没有生成文件 | 检查两个权限开关、有效观测、绝对目录、interval 和正常退出；定位默认不合并先验 |
+| CPU 高或延迟增加 | 检查配准预算、线程数、地图点数及日志开关；关闭不需要的平面显示、图像解压和视觉输入 |
+
+历史实机证据：2026-10-30 用户确认普通 LIO 正常；2026-11-02 用户确认旧图 1549、关闭重力、先验滤波 0.1 时持续定位不再漂移。此前 0.5 先验滤波曾把约 220 万点降成 528 点，实际体素没有有效平面。该旧图已不在当前仓库，不能直接沿用旧命令路径。
+
+当前保留 2327、2329 及 map/priori、map/posteriori 四份 PCD。文件名不能证明采集方式：2327 与 posteriori 字节相同，2329 与 priori 字节相同。开发验证不改写这些地图。
+
+本轮提供核心函数、合成 ROS 流程及离线工具回归，不把历史测试计数机械相加为当前实机验收。开启视觉、MID360S 实机、TEASER/SAC-IA 的跨场景成功率、重力开启后长期定位精度和 CPU 峰值，仍需对应设备／数据验证。
+
+## 14. 回归检查
+
+```bash
+cd /home/fire/Desktop/FAST_LIVO2_Ultra
+source /opt/ros/jazzy/setup.bash
+source /home/fire/Desktop/FAST_LIVO2_Ultra/install/setup.bash
+colcon test --packages-select fast_livo
+colcon test-result --verbose
+python3 /home/fire/Desktop/FAST_LIVO2_Ultra/src/FAST-LIVO2/test/ros_regression.py --install /home/fire/Desktop/FAST_LIVO2_Ultra/install --shutdown-repeats 20
+MPLBACKEND=Agg python3 /home/fire/Desktop/FAST_LIVO2_Ultra/src/FAST-LIVO2/test/tool_regression.py
+```
+
+合成 ROS 检查默认使用独立域 179、仅本机发现，不启动雷达或相机，所有测试点云写临时目录。core_regression 直接调用实际算法／保存函数；ROS 脚本运行已安装程序；工具检查使用真实 Open3D 文件读写及受控 TSDF 替身，**不声称已经运行真实 VDBFusion 重建**。
+
+2026-11-03 当前代码验证：27 项实际核心函数检查、53 项隔离 ROS 合成流程检查及额外 20 次 SIGINT 退出压力检查（ROS 共 73 项）、7 项离线工具检查通过；目标工作空间 8 个包完整构建通过（1 分 51 秒），4 项实际 launch 启动检查通过。ROS 检查包含重力开／关、普通／先验四种流程、倾斜 IMU 初始化、视觉 T_cl 启动、最终 TF 校验、定位约束丢失与消息保留。真实 VDBFusion 后端未安装，网格检查仅覆盖封装、坐标和实际文件 I/O。 已修复 ROS 关闭与回调 wait-set 创建之间的退出竞态，正常关闭仍执行末尾 PCD 保存；ROS 运行期间的异常继续报错。
+
+## 15. 来源与许可证
+
+基于 [FAST-LIVO2](https://github.com/hku-mars/FAST-LIVO2)、[FAST-LIVO2 ROS 2 移植](https://github.com/SuperLDG/FASTLIVO2_ROS2)、[Fast-LIO2-Localization](https://github.com/PolarisXQ/Fast-LIO2-Localization)，并集成 [small_gicp](https://github.com/koide3/small_gicp)、[TEASER++](https://github.com/MIT-SPARK/TEASER-plusplus)、[Livox ROS Driver 2](https://github.com/Livox-SDK/livox_ros_driver2) 和 Vikit。各目录的许可证及原作者声明继续适用；应分别核对学术与商业使用条件，不将整合工程视为统一重新授权。

@@ -1,14 +1,19 @@
 <?xml version="1.0"?>
-<package>
+<package format="3">
   <name>vikit_py</name>
-  <version>0.0.0</version>
+  <version>0.0.1</version>
   <description>The vikit_py package</description>
   <maintainer email="forster@ifi.uzh.ch">Christian Forster</maintainer>
   <license>BSD</license>
 
-  <depend>rclpy</depend>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
 
   <export>
-    <built_type>ament_python</built_type>
+    <build_type>ament_python</build_type>
   </export>
 </package>

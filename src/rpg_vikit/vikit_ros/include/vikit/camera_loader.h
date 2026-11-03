@@ -1,16 +1,10 @@
-/*
- * camera_loader.h
- *
- *  Created on: Feb 11, 2014
- *      Author: cforster
- *  Update on: Feb 01, 2025
- *      Author: StrangeFly
- */
-
+/* Vikit ROS2 camera loading. Original authors: cforster, StrangeFly. */
 #ifndef VIKIT_CAMERA_LOADER_H_
 #define VIKIT_CAMERA_LOADER_H_
-
-#include <string>
+#include <cmath>
+#include <stdexcept>
+#include <memory>
+#include <vector>
 #include <vikit/abstract_camera.h>
 #include <vikit/pinhole_camera.h>
 #include <vikit/atan_camera.h>
@@ -18,147 +12,49 @@
 #include <vikit/equidistant_camera.h>
 #include <vikit/polynomial_camera.h>
 #include <vikit/params_helper.h>
-
-namespace vk {
-namespace camera_loader {
-
-/// Load from ROS Namespace
-inline bool loadFromRosNs(const rclcpp::Node::SharedPtr & nh, const std::string& ns, vk::AbstractCamera*& cam)
-{
-  auto ns_ = ns;
-  if (ns_ != "") {
-    ns_ = ns_ + ".";
+namespace vk { namespace camera_loader {
+template<class T> T value(const rclcpp::Node::SharedPtr &node, const std::string &ns,
+                         const std::string &key, const std::string &alias, T fallback) {
+  const auto &overrides=node->get_node_parameters_interface()->get_parameter_overrides();
+  for (const auto &name : {ns.empty()?key:ns+"."+key, ns.empty()?alias:ns+"."+alias, key, alias}) {
+    if (node->has_parameter(name)) return node->get_parameter(name).template get_value<T>();
+    const auto found=overrides.find(name);
+    if (found!=overrides.end()) return node->declare_parameter<T>(name,fallback);
   }
-  bool res = true;
-  std::string cam_model(getParam<std::string>(nh, ns_+"model"));
-  if(cam_model == "Ocam")
-  {
-    cam = new vk::OmniCamera(getParam<std::string>(nh, ns_+"calib_file", ""));
-  }
-  else if(cam_model == "Pinhole")
-  {
-    cam = new vk::PinholeCamera(
-        getParam<int>(nh, ns_+"width"),
-        getParam<int>(nh, ns_+"height"),
-        getParam<double>(nh, ns_+"scale", 1.0),
-        getParam<double>(nh, ns_+"fx"),
-        getParam<double>(nh, ns_+"fy"),
-        getParam<double>(nh, ns_+"cx"),
-        getParam<double>(nh, ns_+"cy"),
-        getParam<double>(nh, ns_+"d0", 0.0),
-        getParam<double>(nh, ns_+"d1", 0.0),
-        getParam<double>(nh, ns_+"d2", 0.0),
-        getParam<double>(nh, ns_+"d3", 0.0));
-  }
-  else if(cam_model == "EquidistantCamera")
-  {
-    cam = new vk::EquidistantCamera(
-        getParam<int>(nh, ns_+"width"),
-        getParam<int>(nh, ns_+"height"),
-        getParam<double>(nh, ns_+"scale", 1.0),
-        getParam<double>(nh, ns_+"fx"),
-        getParam<double>(nh, ns_+"fy"),
-        getParam<double>(nh, ns_+"cx"),
-        getParam<double>(nh, ns_+"cy"),
-        getParam<double>(nh, ns_+"k1", 0.0),
-        getParam<double>(nh, ns_+"k2", 0.0),
-        getParam<double>(nh, ns_+"k3", 0.0),
-        getParam<double>(nh, ns_+"k4", 0.0));
-  }
-  else if(cam_model == "PolynomialCamera")
-  {
-    cam = new vk::PolynomialCamera(
-        getParam<int>(nh, ns_+"width"),
-        getParam<int>(nh, ns_+"height"),
-        // getParam<double>(nh, ns_+"scale", 1.0),
-        getParam<double>(nh, ns_+"fx"),
-        getParam<double>(nh, ns_+"fy"),
-        getParam<double>(nh, ns_+"cx"),
-        getParam<double>(nh, ns_+"cy"),
-        getParam<double>(nh, ns_+"skew"),
-        getParam<double>(nh, ns_+"k2", 0.0),
-        getParam<double>(nh, ns_+"k3", 0.0),
-        getParam<double>(nh, ns_+"k4", 0.0),
-        getParam<double>(nh, ns_+"k5", 0.0),
-        getParam<double>(nh, ns_+"k6", 0.0),
-        getParam<double>(nh, ns_+"k7", 0.0));
-  }
-  else if(cam_model == "ATAN")
-  {
-    cam = new vk::ATANCamera(
-        getParam<int>(nh, ns_+"width"),
-        getParam<int>(nh, ns_+"height"),
-        getParam<double>(nh, ns_+"fx"),
-        getParam<double>(nh, ns_+"fy"),
-        getParam<double>(nh, ns_+"cx"),
-        getParam<double>(nh, ns_+"cy"),
-        getParam<double>(nh, ns_+"d0"));
-  }
-  else
-  {
-    cam = NULL;
-    res = false;
-  }
-  return res;
+  return fallback;
 }
-
-inline bool loadFromRosNs(const rclcpp::Node::SharedPtr & nh, const std::string& ns, std::vector<vk::AbstractCamera*>& cam_list)
-{
-  auto ns_ = ns;
-  if (ns_ != "") {
-    ns_ = ns_ + ".";
+inline bool loadFromRosNs(const rclcpp::Node::SharedPtr &node, const std::string &ns, vk::AbstractCamera *&cam) {
+  const auto model=value<std::string>(node,ns,"model","cam_model","");
+  if (model=="Ocam") {
+    const auto file=value<std::string>(node,ns,"calib_file","cam_calib_file","");
+    if (file.empty()) throw std::invalid_argument("Ocam requires calib_file.");
+    cam=new vk::OmniCamera(file); return true;
   }
-  bool res = true;
-  std::string cam_model(getParam<std::string>(nh, ns+"model"));
-  int cam_num = getParam<int>(nh, ns+"num");
-  for (int i = 0; i < cam_num; i ++)
-  {
-    std::string cam_ns = ns_ + "cam_" + std::to_string(i);
-    std::string cam_model(getParam<std::string>(nh, cam_ns+".model"));
-    if(cam_model == "FishPoly")
-    {
-      cam_list.push_back(new vk::PolynomialCamera(
-        getParam<int>(nh, cam_ns+"width"),
-        getParam<int>(nh, cam_ns+"height"),
-        // getParam<double>(nh, cam_ns+"/scale", 1.0),
-        getParam<double>(nh, cam_ns+"A11"),  // cam_fx
-        getParam<double>(nh, cam_ns+"A22"),  // cam_fy
-        getParam<double>(nh, cam_ns+"u0"),  // cam_cx
-        getParam<double>(nh, cam_ns+"v0"),  // cam_cy
-        getParam<double>(nh, cam_ns+"A12"), // cam_skew
-        getParam<double>(nh, cam_ns+"k2", 0.0),
-        getParam<double>(nh, cam_ns+"k3", 0.0),
-        getParam<double>(nh, cam_ns+"k4", 0.0),
-        getParam<double>(nh, cam_ns+"k5", 0.0),
-        getParam<double>(nh, cam_ns+"k6", 0.0),
-        getParam<double>(nh, cam_ns+"k7", 0.0)));
-    }
-    else if(cam_model == "Pinhole")
-    {
-      cam_list.push_back(new vk::PinholeCamera(
-          getParam<int>(nh, ns+"width"),
-          getParam<int>(nh, ns+"height"),
-          getParam<double>(nh, ns+"scale", 1.0),
-          getParam<double>(nh, ns+"fx"),
-          getParam<double>(nh, ns+"fy"),
-          getParam<double>(nh, ns+"cx"),
-          getParam<double>(nh, ns+"cy"),
-          getParam<double>(nh, ns+"d0", 0.0),
-          getParam<double>(nh, ns+"d1", 0.0),
-          getParam<double>(nh, ns+"d2", 0.0),
-          getParam<double>(nh, ns+"d3", 0.0)));
-    }
-    else 
-    {
-      // cam_list.clear();
-      res = false;
-    }
-  }
-  
-  return res;
+  const int width=value<int>(node,ns,"width","cam_width",0), height=value<int>(node,ns,"height","cam_height",0);
+  const double scale=value<double>(node,ns,"scale","cam_scale",1.0);
+  const double fx=value<double>(node,ns,"fx","cam_fx",0), fy=value<double>(node,ns,"fy","cam_fy",0);
+  const double cx=value<double>(node,ns,"cx","cam_cx",0), cy=value<double>(node,ns,"cy","cam_cy",0);
+  if (width<=0 || height<=0 || !std::isfinite(scale) || scale<=0 || !std::isfinite(fx) || fx<=0 ||
+      !std::isfinite(fy) || fy<=0 || !std::isfinite(cx) || !std::isfinite(cy))
+    throw std::invalid_argument("Camera requires positive resolution, scale and focal lengths and finite principal point.");
+  auto d=[&](const std::string &key) { double v=value<double>(node,ns,key,"cam_"+key,0.0); if(!std::isfinite(v)) throw std::invalid_argument("Camera coefficients must be finite."); return v; };
+  if (model=="Pinhole") cam=new vk::PinholeCamera(width,height,scale,fx,fy,cx,cy,d("d0"),d("d1"),d("d2"),d("d3"));
+  else if (model=="EquidistantCamera") cam=new vk::EquidistantCamera(width,height,scale,fx,fy,cx,cy,d("k1"),d("k2"),d("k3"),d("k4"));
+  else if (model=="PolynomialCamera" || model=="FishPoly") cam=new vk::PolynomialCamera(width,height,fx,fy,cx,cy,d("skew"),d("k2"),d("k3"),d("k4"),d("k5"),d("k6"),d("k7"));
+  else if (model=="ATAN") cam=new vk::ATANCamera(width,height,fx,fy,cx,cy,d("d0"));
+  else { cam=nullptr; return false; }
+  return true;
 }
-
-} // namespace camera_loader
-} // namespace vk
-
-#endif // VIKIT_CAMERA_LOADER_H_
+inline bool loadFromRosNs(const rclcpp::Node::SharedPtr &node, const std::string &ns, std::vector<vk::AbstractCamera*> &cameras) {
+  const int count=value<int>(node,ns,"num","cam_num",0);
+  if(count<1) return false;
+  std::vector<std::unique_ptr<vk::AbstractCamera>> loaded;
+  for(int i=0;i<count;++i) { vk::AbstractCamera *camera=nullptr;
+    if(!loadFromRosNs(node,ns+".cam_"+std::to_string(i),camera)) return false;
+    loaded.emplace_back(camera);
+  }
+  for(auto &camera:loaded) cameras.push_back(camera.release());
+  return true;
+}
+}} // namespace vk::camera_loader
+#endif

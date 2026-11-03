@@ -5,14 +5,14 @@
     locate_in_prior_map: true
     # 普通建图允许留空；定位模式需填写已有 PCD 的绝对路径，另行启动外部重定位节点。
     # 重定位入口读取此处同一个路径；launch 不检查或转换地图路径。
-    prior_map_path: "/home/fire/Desktop/FAST_LIVO2_ROS2_relocation_ultra/PCD/map_1102_2327.pcd"
+    prior_map_path: "/home/fire/Desktop/FAST_LIVO2_Ultra/PCD/map_1102_2327.pcd"
 
     time_check:
       # 启动时只读校验系统时钟同步状态；失败立即退出，不进入建图。
       # 关闭后仍可建图，但日期未经校验；不会自动联网校时或修改系统时间。
       enabled: true
 
-    # 参数参考 A 工程 livo.yaml + mid360.yaml，适配 B 工程当前的参数接口。
+    # MID360 + IMU 算法配置；驱动和相机参数分别管理。
     common:
       img_topic: "/camera/camera/color/image_raw"
       lid_topic: "/livox/lidar"
@@ -27,7 +27,7 @@
       extrinsic_R: [1.0, 0.0, 0.0,
                     0.0, 1.0, 0.0,
                     0.0, 0.0, 1.0]
-      # A 的 T_cl 拆成 B 支持的 Rcl/Pcl：p_camera = Rcl * p_lidar + Pcl。
+      # LiDAR 到相机旧式外参：p_camera = Rcl * p_lidar + Pcl；也支持 4x4 T_cl。
       # 当前 img_en=0，这组相机外参不参与实时视觉融合。
       Rcl: [-0.000855966483645, -0.999828172768721, -0.018517350224543,
              0.598269757782753,  0.014325846918316, -0.801166691165228,
@@ -35,7 +35,7 @@
       Pcl: [0.031768816365067, -0.108594539194672, 0.016584619676391]
 
     time_offset:
-      # B 尚未读取 imu_time_offset；当前值与其代码默认值均为 0。
+      # IMU 接收时间减去该偏移（秒）。
       imu_time_offset: 0.0
       # 沿用 A 的记录值；当前关闭视觉，启用视觉前需重新验证。
       img_time_offset: 0.1
@@ -53,7 +53,7 @@
 
     vio:
       max_iterations: 5
-      # A 的值均为 1000.0；B 当前要求整数参数，数值保持一致。
+      # 接受整数或浮点 YAML 值；内部使用 double。
       outlier_threshold: 1000
       img_point_cov: 1000
       patch_size: 8
@@ -73,13 +73,14 @@
       imu_int_frame: 30
       acc_cov: 0.1
       gyr_cov: 0.1
-      # B 当前固定使用 0.0001，并未读取以下两项；与 A 本次参考值相同。
+      # IMU 加速度计和陀螺仪偏置噪声协方差，实际传给 IMU 模块。
       b_acc_cov: 0.0001
       b_gyr_cov: 0.0001
 
     lio:
       # LIO 最大迭代次数；收敛时可以提前结束，与 A 使用相同参数名。
       max_iterations: 5
+      min_effective_points: 6
       dept_err: 0.02
       beam_err: 0.05
       min_eigen_value: 0.0025
@@ -103,6 +104,7 @@
       dense_map_en: true
       pub_effect_point_en: false
       pub_plane_en: true
+      plane_publish_period: 0.2
       pub_scan_num: 1
       blind_rgb_points: 0.0
       map_frame_id: "map"
@@ -115,9 +117,33 @@
       # interval=-1 时正常退出后写盘；目录必须是绝对路径，程序会自动创建。
       # 启动时固定 map_MMDD_HHMM 前缀；正数间隔分段追加 _0001 等序号。
       pcd_save_en: true
+      # 0=局部 camera_init；1=各帧 IMU 系（不能直接叠图）；2=先验 map 系。
+      type: 0
       # 定位模式需总开关和本开关同时开启才保存；普通建图不受本项影响。
       save_in_localization: true
-      output_dir: "/home/fire/Desktop/FAST_LIVO2_ROS2_relocation_ultra/PCD"
+      output_dir: "/home/fire/Desktop/FAST_LIVO2_Ultra/PCD"
       colmap_output_en: false
       filter_size_pcd: 0.15
       interval: -1
+
+    # 输出日志默认关闭；告警和初始化结果不受这些开关影响。
+    log:
+      sensor: false
+      lio: false
+      timing: false
+      map_sliding: false
+
+    localization:
+      # 连续丢失有效约束后以错误码退出；先检查地图和初值，再重启建图与重定位。
+      max_unconstrained_frames: 5
+
+    image_save:
+      img_save_en: false
+      interval: 1
+      output_dir: "/home/fire/Desktop/FAST_LIVO2_Ultra/images"
+
+    relocalization:
+      num_threads: 4
+      max_attempts: 300
+      timeout_seconds: 120.0
+      result_hold_seconds: 5.0

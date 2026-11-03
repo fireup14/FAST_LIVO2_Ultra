@@ -1,8 +1,8 @@
 /**:
   ros__parameters:
     # 参考 A 工程 d405.yaml，数值来自 D405 的 640x360x30 color/camera_info。
-    # 将 A 的 cam_* 参数名转换为 B 的 camera_loader 当前读取的名称。
-    # 当前 img_en=0，B 仍会加载相机模型，但不接收图像进行融合；不要求启动相机。
+    # 支持当前键名与对应 cam_* 别名。
+    # img_en=0 时跳过相机模型和图像订阅；开启视觉才读取本文件。
     camera:
       model: Pinhole
       width: 640

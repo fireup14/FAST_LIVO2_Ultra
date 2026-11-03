@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.10)
 project(fast_livo)
 
-set(CMAKE_BUILD_TYPE "Release")
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 
 set(CMAKE_CXX_STANDARD 17)
@@ -25,12 +27,12 @@ message(STATUS "Current CPU architecture: ${CMAKE_SYSTEM_PROCESSOR}")
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|aarch64|ARM|AARCH64)")
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
     # 64-bit ARM optimizations (e.g., RK3588 and Jetson Orin NX)
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -mcpu=native -mtune=native -ffast-math")
-    message(STATUS "Using 64-bit ARM optimizations: -O3 -mcpu=native -mtune=native -ffast-math")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -mcpu=native -mtune=native")
+    message(STATUS "Using 64-bit ARM optimizations: -O3 -mcpu=native -mtune=native")
   else()
     # 32-bit ARM optimizations with NEON support
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -mcpu=native -mtune=native -mfpu=neon -ffast-math")
-    message(STATUS "Using 32-bit ARM optimizations: -O3 -mcpu=native -mtune=native -mfpu=neon -ffast-math")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -mcpu=native -mtune=native -mfpu=neon")
+    message(STATUS "Using 32-bit ARM optimizations: -O3 -mcpu=native -mtune=native -mfpu=neon")
   endif()
   add_definitions(-DARM_ARCH)
 else()
@@ -82,6 +84,8 @@ endif()
 
 # Find ament and required dependencies
 find_package(ament_cmake REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+find_package(fmt REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -132,7 +136,12 @@ set(dependencies
   livox_ros_driver2
 )
 
-set(COMMON_DEPENDENCIES OpenMP::OpenMP_CXX)
+set(COMMON_DEPENDENCIES)
+if(OpenMP_CXX_FOUND)
+  list(APPEND COMMON_DEPENDENCIES OpenMP::OpenMP_CXX)
+endif()
+rosidl_generate_interfaces(${PROJECT_NAME} "msg/State6Stamped.msg" DEPENDENCIES std_msgs geometry_msgs)
+rosidl_get_typesupport_target(state6_typesupport ${PROJECT_NAME} rosidl_typesupport_cpp)
 
 # link_directories(${COMMON_DEPENDENCIES}
 #   ${vikit_common_LIBRARIES}/libvikit_common.so
@@ -140,12 +149,12 @@ set(COMMON_DEPENDENCIES OpenMP::OpenMP_CXX)
 # )
 
 # Add libraries
-add_library(vio src/vio.cpp src/frame.cpp src/visual_point.cpp)
-add_library(lio src/voxel_map.cpp)
-add_library(pre src/preprocess.cpp)
-add_library(imu_proc src/IMU_Processing.cpp)
-add_library(laser_mapping src/LIVMapper.cpp)
-add_library(utils src/utils.cpp)
+add_library(vio STATIC src/vio.cpp src/frame.cpp src/visual_point.cpp)
+add_library(lio STATIC src/voxel_map.cpp)
+add_library(pre STATIC src/preprocess.cpp)
+add_library(imu_proc STATIC src/IMU_Processing.cpp)
+add_library(laser_mapping STATIC src/LIVMapper.cpp)
+add_library(utils STATIC src/utils.cpp)
 
 ament_target_dependencies(vio ${dependencies} )
 ament_target_dependencies(lio ${dependencies})
@@ -155,11 +164,11 @@ ament_target_dependencies(laser_mapping ${dependencies})
 
 # linking libraries or executables to public dependencies
 target_link_libraries(laser_mapping 
-    ${CMAKE_SOURCE_DIR}/../../install/vikit_common/lib/libvikit_common.so 
-    ${CMAKE_SOURCE_DIR}/../../install/vikit_ros/lib/libvikit_ros.so
+    ${state6_typesupport}
+    fmt::fmt
     ${COMMON_DEPENDENCIES}
 )
-target_link_libraries(vio ${COMMON_DEPENDENCIES})
+target_link_libraries(vio ${COMMON_DEPENDENCIES} fmt::fmt)
 target_link_libraries(lio utils ${COMMON_DEPENDENCIES})
 target_link_libraries(pre ${COMMON_DEPENDENCIES})
 target_link_libraries(imu_proc ${COMMON_DEPENDENCIES})
@@ -180,11 +189,21 @@ target_link_libraries(fastlivo_mapping
   ${OpenCV_LIBRARIES}
   ${Sophus_LIBRARIES}
   ${Boost_LIBRARIES}
+  fmt::fmt
 )
 
 # Link mimalloc if found
 if(mimalloc_FOUND)
   target_link_libraries(fastlivo_mapping mimalloc)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(core_regression test/core_regression.cpp)
+  ament_target_dependencies(core_regression ${dependencies})
+  target_link_libraries(core_regression laser_mapping vio lio pre imu_proc ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${Boost_LIBRARIES} fmt::fmt)
+  add_test(NAME core_regression COMMAND core_regression)
+  set_tests_properties(core_regression PROPERTIES ENVIRONMENT "ROS_DOMAIN_ID=179;ROS_LOCALHOST_ONLY=1;ROS_LOG_DIR=/tmp/ultra-core-ros-logs")
 endif()
 
 # Install the executable
@@ -216,4 +235,6 @@ ament_export_dependencies(
   Sophus
 )
 
+install(PROGRAMS scripts/mesh.py scripts/colmap_output.sh DESTINATION lib/${PROJECT_NAME})
+ament_export_dependencies(rosidl_default_runtime)
 ament_package()

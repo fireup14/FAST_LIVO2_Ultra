@@ -1,4 +1,11 @@
 #include <chrono>
+#include <algorithm>
+#include <filesystem>
+#include <omp.h>
+#include <pcl/features/normal_3d_omp.h>
+#include <pcl/features/fpfh_omp.h>
+#include <pcl/registration/ia_ransac.h>
+#include <pcl/registration/icp.h>
 #include <cmath>
 #include <memory>
 #include <stdexcept>
@@ -44,11 +51,21 @@ enum class LocalizationState {
 class TeaserGicpNode : public rclcpp::Node
 {
 public:
-    TeaserGicpNode()
+    explicit TeaserGicpNode(const std::string &algorithm)
         : Node("teaser_gicp_node"), state_(LocalizationState::TEASER_PHASE)
     {
         // ================= 参数声明 =================
         
+        this->declare_parameter("algorithm", algorithm);
+        this->declare_parameter("max_attempts", 300);
+        this->declare_parameter("timeout_seconds", 120.0);
+        this->declare_parameter("result_hold_seconds", 5.0);
+        algorithm_ = this->get_parameter("algorithm").as_string();
+        max_attempts_ = this->get_parameter("max_attempts").as_int();
+        timeout_seconds_ = this->get_parameter("timeout_seconds").as_double();
+        result_hold_seconds_ = this->get_parameter("result_hold_seconds").as_double();
+        if (algorithm_!="teaser_gicp" && algorithm_!="teaser" && algorithm_!="gicp" && algorithm_!="icp" && algorithm_!="sac_ia_icp")
+            throw std::invalid_argument("algorithm must be teaser_gicp, teaser, gicp, icp or sac_ia_icp.");
         // 1. 基础配置
         this->declare_parameter("locate_in_prior_map", false);
         this->declare_parameter("prior_map_path", "");
@@ -110,7 +127,7 @@ public:
         this->get_parameter("registration_type", registration_type_);
 
         // ================= 初始化 ROS 接口 =================
-        publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("icp_result", 10);
+        publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("icp_result", rclcpp::QoS(1).reliable().transient_local());
         map_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
             "prior_map", rclcpp::QoS(1).transient_local().reliable());
         transformed_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("transformed_cloud", 10);
@@ -127,23 +144,38 @@ public:
             return;
         }
 
-        if (prior_map_path_.empty()) {
+        if (prior_map_path_.empty() || !std::filesystem::path(prior_map_path_).is_absolute()) {
             throw std::invalid_argument(
                 "locate_in_prior_map=true requires a non-empty prior_map_path.");
         }
         initialize_pose_conversion();
+        const double positive[] = {teaser_map_voxel_, teaser_cloud_voxel_, gicp_map_voxel_, gicp_cloud_voxel_,
+            fpfh_normal_radius_, fpfh_feature_radius_, noise_bound_, max_correspondence_distance_, fitness_score_thre_, timeout_seconds_};
+        for (double v : positive) if (!std::isfinite(v) || v<=0) throw std::invalid_argument("Registration sizes, thresholds and timeout must be finite and positive.");
+        if (num_threads_<1 || gicp_solver_max_iter_<1 || teaser_solver_max_iter_<1 || teaser_success_count_thre_<1 ||
+            gicp_converged_count_thre_<1 || max_attempts_<1 || inlier_thr<3 || !std::isfinite(result_hold_seconds_) || result_hold_seconds_<0 ||
+            !std::isfinite(rotation_gnc_factor_) || rotation_gnc_factor_<=1 || fpfh_feature_radius_<=fpfh_normal_radius_ ||
+            (registration_type_!="GICP" && registration_type_!="VGICP"))
+            throw std::invalid_argument("Invalid registration count, thread count, feature radii or registration_type.");
+        omp_set_num_threads(num_threads_);
+        start_time_ = std::chrono::steady_clock::now();
+        watchdog_ = this->create_wall_timer(std::chrono::milliseconds(100), [this] {
+            const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - (finished_ ? success_time_ : start_time_)).count();
+            if (finished_) { if (elapsed>=result_hold_seconds_) rclcpp::shutdown(); }
+            else if (elapsed>=timeout_seconds_) throw std::runtime_error("Relocalization timed out; no initial pose was published.");
+        });
 
 #ifdef USE_LIVOX
         if (pcl_type_ == "livox") {
             lvx_cloud_sub_ = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(
-                "/livox/lidar", 10, std::bind(&TeaserGicpNode::lvx_cloud_callback, this, std::placeholders::_1));
+                "/livox/lidar", rclcpp::SensorDataQoS().keep_last(1), std::bind(&TeaserGicpNode::lvx_cloud_callback, this, std::placeholders::_1));
         } else {
             cloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                "/pointcloud2", 10, std::bind(&TeaserGicpNode::cloud_callback, this, std::placeholders::_1));
+                "/pointcloud2", rclcpp::SensorDataQoS().keep_last(1), std::bind(&TeaserGicpNode::cloud_callback, this, std::placeholders::_1));
         }
 #else
         cloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-            "/pointcloud2", 10, std::bind(&TeaserGicpNode::cloud_callback, this, std::placeholders::_1));
+            "/pointcloud2", rclcpp::SensorDataQoS().keep_last(1), std::bind(&TeaserGicpNode::cloud_callback, this, std::placeholders::_1));
 #endif
         pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
             "initialpose", 10, std::bind(&TeaserGicpNode::pose_callback, this, std::placeholders::_1));
@@ -154,10 +186,11 @@ public:
         }
 
         // ================= 初始化 TEASER =================
-        init_teaser();
+        if (algorithm_ == "teaser_gicp" || algorithm_ == "teaser") init_teaser();
 
         // ================= 初始化 GICP =================
         init_gicp();
+        if (algorithm_ == "gicp" || algorithm_ == "icp") state_ = LocalizationState::GICP_PHASE;
 
         RCLCPP_INFO(this->get_logger(), "=== TeaserGicpNode Initialized ===");
         RCLCPP_INFO(this->get_logger(), "Starting in TEASER phase for global localization...");
@@ -228,6 +261,8 @@ private:
             RCLCPP_ERROR(this->get_logger(), "Could not read map file: %s", prior_map_path_.c_str());
             return false;
         }
+        if (std::any_of(raw_map->begin(), raw_map->end(), [](const auto &point){ return !pcl::isFinite(point); }))
+            throw std::invalid_argument("Prior map contains non-finite XYZ.");
         if (raw_map->empty()) {
             RCLCPP_ERROR(this->get_logger(), "Prior map contains no points: %s", prior_map_path_.c_str());
             return false;
@@ -245,6 +280,9 @@ private:
         gicp_map_pcl_ = small_gicp::voxelgrid_sampling_omp(*raw_map, gicp_map_voxel_, num_threads_);
         RCLCPP_INFO(this->get_logger(), "GICP map downsampled to %zu points", gicp_map_pcl_->size());
 
+        if (teaser_map_pcl_->size()<10 || gicp_map_pcl_->size()<10)
+            throw std::invalid_argument("Prior map has fewer than 10 points after registration downsampling.");
+        convert_pcl_to_teaser(teaser_map_pcl_, teaser_map_cloud_);
         // 发布地图
         sensor_msgs::msg::PointCloud2 map_msg;
         pcl::toROSMsg(*gicp_map_pcl_, map_msg);  // 发布更精细的地图用于可视化
@@ -273,6 +311,7 @@ private:
     {
         gicp_reg_.setRegistrationType(registration_type_);
         gicp_reg_.setNumThreads(num_threads_);
+        gicp_reg_.setMaximumIterations(gicp_solver_max_iter_);
         gicp_reg_.setMaxCorrespondenceDistance(max_correspondence_distance_);
         gicp_reg_.setCorrespondenceRandomness(20);
         gicp_reg_.setInputTarget(gicp_map_pcl_);
@@ -288,6 +327,13 @@ private:
             return;
         }
 
+        if (finished_) return;
+        if (!input_cloud || input_cloud->size()<10) return;
+        input_cloud->erase(std::remove_if(input_cloud->begin(), input_cloud->end(), [](const auto &point){ return !pcl::isFinite(point); }), input_cloud->end());
+        if (input_cloud->size()<10) return;
+        if (++attempts_ > max_attempts_ || std::chrono::duration<double>(std::chrono::steady_clock::now()-start_time_).count()>=timeout_seconds_)
+            throw std::runtime_error("Relocalization retry/time limit reached without a valid result.");
+        if (algorithm_=="sac_ia_icp" && state_==LocalizationState::TEASER_PHASE) { process_sac(input_cloud); return; }
         switch (state_) {
             case LocalizationState::TEASER_PHASE:
                 process_teaser(input_cloud);
@@ -328,7 +374,7 @@ private:
         RCLCPP_INFO(this->get_logger(), "[TEASER] Correspondences found: %zu (threshold: %zu)", 
             correspondences.size(), teaser_inlier_threshold_);
 
-        if (correspondences.size() < 10) {  // 至少需要一些对应点才能求解
+        if (correspondences.size() < std::max<size_t>(3, teaser_inlier_threshold_)) {  // 至少需要一些对应点才能求解
             RCLCPP_WARN(this->get_logger(), "[TEASER] Too few correspondences for solving");
             teaser_success_count_ = 0;
             // 发布原始点云用于调试
@@ -355,7 +401,7 @@ private:
         auto solution = solver.getSolution();
 
         // 5. 结果验证
-        if (solution.valid) {
+        if (solution.valid && solution.rotation.allFinite() && solution.translation.allFinite()) {
             auto inliers = solver.getTranslationInliers();
             RCLCPP_INFO(this->get_logger(), "[TEASER] Solved in %.2f ms. Inliers: %zu/%zu (threshold: %zu)", 
                 std::chrono::duration<double, std::milli>(end - start).count(), 
@@ -387,6 +433,7 @@ private:
                         transform(0, 3), transform(1, 3), transform(2, 3));
                     RCLCPP_INFO(this->get_logger(), "====================================");
                     
+                    if (algorithm_=="teaser") { complete(transform, transformed_cloud); return; }
                     state_ = LocalizationState::GICP_PHASE;
                     gicp_converged_count_ = 0;
                 }
@@ -409,18 +456,25 @@ private:
         // 1. 降采样
         auto src_cloud = small_gicp::voxelgrid_sampling_omp(*input_cloud, gicp_cloud_voxel_, num_threads_);
 
-        // 2. 设置 Source
-        gicp_reg_.setInputSource(src_cloud);
-
-        // 3. 执行配准
+        if (src_cloud->size()<10) return;
         pcl::PointCloud<pcl::PointXYZ> aligned_cloud;
-        gicp_reg_.align(aligned_cloud, gicp_init_guess_);
-
-        // 4. 获取结果
-        bool converged = gicp_reg_.hasConverged();
-        double fitness_score = gicp_reg_.getFitnessScore();
-        Eigen::Matrix4f final_transform = gicp_reg_.getFinalTransformation();
-
+        bool converged;
+        double fitness_score;
+        Eigen::Matrix4f final_transform;
+        if (algorithm_=="icp" || algorithm_=="sac_ia_icp") {
+            pcl::IterativeClosestPoint<pcl::PointXYZ,pcl::PointXYZ> icp;
+            icp.setMaximumIterations(gicp_solver_max_iter_);
+            icp.setMaxCorrespondenceDistance(max_correspondence_distance_);
+            icp.setEuclideanFitnessEpsilon(1e-6);
+            icp.setInputSource(src_cloud); icp.setInputTarget(gicp_map_pcl_);
+            icp.align(aligned_cloud,gicp_init_guess_);
+            converged=icp.hasConverged(); fitness_score=icp.getFitnessScore(); final_transform=icp.getFinalTransformation();
+        } else {
+            gicp_reg_.setInputSource(src_cloud);
+            gicp_reg_.align(aligned_cloud, gicp_init_guess_);
+            converged=gicp_reg_.hasConverged(); fitness_score=gicp_reg_.getFitnessScore(); final_transform=gicp_reg_.getFinalTransformation();
+        }
+        converged = converged && std::isfinite(fitness_score) && final_transform.allFinite();
         RCLCPP_INFO(this->get_logger(), "[GICP] Fitness: %.4f, Converged: %d", fitness_score, converged);
 
         if (converged && fitness_score < fitness_score_thre_) {
@@ -428,24 +482,14 @@ private:
             RCLCPP_INFO(this->get_logger(), "[GICP] Converged count: %d / %d", 
                 gicp_converged_count_, gicp_converged_count_thre_);
 
-            if (gicp_converged_count_ > gicp_converged_count_thre_) {
+            if (gicp_converged_count_ >= gicp_converged_count_thre_) {
                 RCLCPP_INFO(this->get_logger(), "====================================");
                 RCLCPP_INFO(this->get_logger(), "LOCALIZATION SUCCESS!");
                 RCLCPP_INFO(this->get_logger(), "Final LiDAR pose in map: x=%.3f, y=%.3f, z=%.3f",
                     final_transform(0, 3), final_transform(1, 3), final_transform(2, 3));
                 RCLCPP_INFO(this->get_logger(), "====================================");
 
-                // 发布最终 Pose
-                publish_pose(final_transform);
-
-                // 发布对齐后的点云
-                publish_debug_cloud(aligned_cloud);
-
-                // DDS handles transport ACKs without subscriber-side code changes.
-                wait_for_pose_ack();
-
-                // 任务完成
-                rclcpp::shutdown();
+                complete(final_transform, aligned_cloud);
                 return;
             } else {
                 // 更新初值
@@ -462,7 +506,7 @@ private:
                 gicp_fail_count_++;
                 if (gicp_fail_count_ > 10) {
                     RCLCPP_WARN(this->get_logger(), "GICP failing too often, switching back to TEASER...");
-                    state_ = LocalizationState::TEASER_PHASE;
+                    state_ = (algorithm_=="gicp" || algorithm_=="icp") ? LocalizationState::GICP_PHASE : LocalizationState::TEASER_PHASE;
                     teaser_success_count_ = 0;
                     gicp_fail_count_ = 0;
                 }
@@ -472,7 +516,7 @@ private:
                 
                 if (gicp_fail_count_ > 5) {
                     RCLCPP_WARN(this->get_logger(), "GICP failing, switching back to TEASER...");
-                    state_ = LocalizationState::TEASER_PHASE;
+                    state_ = (algorithm_=="gicp" || algorithm_=="icp") ? LocalizationState::GICP_PHASE : LocalizationState::TEASER_PHASE;
                     teaser_success_count_ = 0;
                     gicp_fail_count_ = 0;
                 }
@@ -484,6 +528,46 @@ private:
         pcl::PointCloud<pcl::PointXYZ> debug_cloud;
         pcl::transformPointCloud(*src_cloud, debug_cloud, gicp_init_guess_);
         publish_debug_cloud(debug_cloud);
+    }
+
+    void complete(const Eigen::Matrix4f &transform, const pcl::PointCloud<pcl::PointXYZ> &cloud)
+    {
+        publish_pose(transform);
+        publish_debug_cloud(cloud);
+        wait_for_pose_ack();
+        finished_ = true;
+        success_time_ = std::chrono::steady_clock::now();
+        RCLCPP_INFO(get_logger(), "Result retained for %.1f seconds for late subscribers, then the solver exits.", result_hold_seconds_);
+    }
+
+    pcl::PointCloud<pcl::FPFHSignature33>::Ptr features(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud)
+    {
+        pcl::PointCloud<pcl::Normal>::Ptr normals(new pcl::PointCloud<pcl::Normal>);
+        pcl::NormalEstimationOMP<pcl::PointXYZ,pcl::Normal> normal_estimation(num_threads_);
+        normal_estimation.setInputCloud(cloud); normal_estimation.setRadiusSearch(fpfh_normal_radius_); normal_estimation.compute(*normals);
+        pcl::PointCloud<pcl::FPFHSignature33>::Ptr output(new pcl::PointCloud<pcl::FPFHSignature33>);
+        pcl::FPFHEstimationOMP<pcl::PointXYZ,pcl::Normal,pcl::FPFHSignature33> estimation;
+        estimation.setNumberOfThreads(num_threads_); estimation.setInputCloud(cloud); estimation.setInputNormals(normals);
+        estimation.setRadiusSearch(fpfh_feature_radius_); estimation.compute(*output);
+        return output;
+    }
+
+    void process_sac(const pcl::PointCloud<pcl::PointXYZ>::Ptr &input)
+    {
+        auto source=small_gicp::voxelgrid_sampling_omp(*input,teaser_cloud_voxel_,num_threads_);
+        if (source->size()<10) return;
+        if (!sac_target_features_) sac_target_features_=features(teaser_map_pcl_);
+        pcl::SampleConsensusInitialAlignment<pcl::PointXYZ,pcl::PointXYZ,pcl::FPFHSignature33> sac;
+        sac.setInputSource(source); sac.setSourceFeatures(features(source));
+        sac.setInputTarget(teaser_map_pcl_); sac.setTargetFeatures(sac_target_features_);
+        sac.setMaximumIterations(teaser_solver_max_iter_); sac.setMinSampleDistance(noise_bound_);
+        sac.setCorrespondenceRandomness(std::min<int>(20,teaser_map_pcl_->size()));
+        pcl::PointCloud<pcl::PointXYZ> aligned;
+        sac.align(aligned);
+        if (!sac.hasConverged() || !sac.getFinalTransformation().allFinite()) return;
+        gicp_init_guess_=sac.getFinalTransformation();
+        state_=LocalizationState::GICP_PHASE;
+        gicp_converged_count_=0;
     }
 
     // ===================== 辅助函数 =====================
@@ -590,6 +674,11 @@ private:
 
     void pose_callback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
     {
+        const auto &position=msg->pose.pose.position; const auto &orientation=msg->pose.pose.orientation;
+        const double norm=orientation.x*orientation.x+orientation.y*orientation.y+orientation.z*orientation.z+orientation.w*orientation.w;
+        if (msg->header.frame_id!=map_frame_id_ || !std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z) || !std::isfinite(norm) || norm<1e-12) {
+            RCLCPP_WARN(get_logger(), "Ignoring invalid manual LiDAR pose."); return;
+        }
         // 手动设置初始位姿，直接跳转到 GICP 阶段
         gicp_init_guess_ = Eigen::Matrix4f::Identity();
         gicp_init_guess_(0, 3) = msg->pose.pose.position.x;
@@ -629,6 +718,13 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_sub_;
     rclcpp::TimerBase::SharedPtr disabled_output_timer_;
 
+    std::string algorithm_;
+    int max_attempts_=300, attempts_=0;
+    double timeout_seconds_=120, result_hold_seconds_=5;
+    bool finished_=false;
+    std::chrono::steady_clock::time_point start_time_,success_time_;
+    rclcpp::TimerBase::SharedPtr watchdog_;
+    pcl::PointCloud<pcl::FPFHSignature33>::Ptr sac_target_features_;
     // 状态
     LocalizationState state_;
 
@@ -661,11 +757,11 @@ private:
     std::string registration_type_;
 };
 
-int main(int argc, char *argv[])
+int run_registration_node(int argc, char *argv[], const char *algorithm)
 {
     rclcpp::init(argc, argv);
     try {
-        rclcpp::spin(std::make_shared<TeaserGicpNode>());
+        rclcpp::spin(std::make_shared<TeaserGicpNode>(algorithm));
     } catch (const std::exception& error) {
         RCLCPP_ERROR(rclcpp::get_logger("teaser_gicp_node"), "%s", error.what());
         rclcpp::shutdown();
