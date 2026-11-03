@@ -193,7 +193,6 @@ public:
   vector<pointWithVar> _pv_list;
   vector<double> extrinT;
   vector<double> extrinR;
-  vector<double> cameraextrinTcl;
   vector<double> cameraextrinT;
   vector<double> cameraextrinR;
   double IMG_POINT_COV;

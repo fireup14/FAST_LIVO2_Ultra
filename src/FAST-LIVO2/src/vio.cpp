@@ -53,35 +53,11 @@ void VIOManager::setLidarToCameraExtrinsic(const vector<double> &R, const vector
   if (R.size() != 9 || P.size() != 3)
   {
     throw std::invalid_argument(
-        "Legacy extrin_calib.Rcl/Pcl must contain exactly 9 and 3 values.");
+        "extrin_calib.Rcl/Pcl must contain exactly 9 and 3 values.");
   }
 
   Rcl << MAT_FROM_ARRAY(R);
   Pcl << VEC_FROM_ARRAY(P);
-  if (!Pcl.allFinite()) throw std::invalid_argument("Camera translation must be finite.");
-  validateLidarToCameraRotation(Rcl);
-}
-
-void VIOManager::setLidarToCameraExtrinsic(const vector<double> &T_cl)
-{
-  if (T_cl.size() != 16)
-  {
-    throw std::invalid_argument("extrin_calib.T_cl must contain exactly 16 values.");
-  }
-
-  for (double v : T_cl) if (!std::isfinite(v)) throw std::invalid_argument("T_cl must be finite.");
-  constexpr double tolerance = 1e-9;
-  if (std::abs(T_cl[12]) > tolerance || std::abs(T_cl[13]) > tolerance ||
-      std::abs(T_cl[14]) > tolerance || std::abs(T_cl[15] - 1.0) > tolerance)
-  {
-    throw std::invalid_argument(
-        "The last row of extrin_calib.T_cl must be [0, 0, 0, 1].");
-  }
-
-  Rcl << T_cl[0], T_cl[1], T_cl[2],
-         T_cl[4], T_cl[5], T_cl[6],
-         T_cl[8], T_cl[9], T_cl[10];
-  Pcl << T_cl[3], T_cl[7], T_cl[11];
   if (!Pcl.allFinite()) throw std::invalid_argument("Camera translation must be finite.");
   validateLidarToCameraRotation(Rcl);
 }

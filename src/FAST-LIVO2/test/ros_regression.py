@@ -15,7 +15,8 @@ os.environ.setdefault("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST")
 os.environ.setdefault("ROS_LOG_DIR", "/tmp/ultra-regression-ros-logs")
 import rclpy
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
-from sensor_msgs.msg import Imu
+from ament_index_python.packages import get_package_prefix
+from sensor_msgs.msg import Imu, Image, CompressedImage
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from std_msgs.msg import Bool
@@ -58,12 +59,13 @@ class Runner:
                         "\nHEIGHT 1\nPOINTS " + str(len(points)) + "\nDATA ascii\n" +
                         "\n".join(" ".join(map(str, p)) for p in points)+"\n")
 
-    def start(self, package, executable, parameters):
+    def start(self, package, executable, parameters, *, executable_prefix=None, extra_arguments=()):
         config=self.temporary/f"params-{len(self.processes)}.yaml"
         config.write_text(yaml.safe_dump({"/**":{"ros__parameters":parameters}}))
         log=self.temporary/f"process-{len(self.processes)}.log"
         stream=log.open("w")
-        process=subprocess.Popen([str(self.install/package/"lib"/package/executable),"--ros-args","--params-file",str(config)],
+        prefix=self.install/package if executable_prefix is None else executable_prefix
+        process=subprocess.Popen([str(prefix/"lib"/package/executable),"--ros-args","--params-file",str(config),*extra_arguments],
                                  stdout=stream,stderr=subprocess.STDOUT)
         self.processes.append((process,stream,log))
         return process,log
@@ -188,11 +190,12 @@ class Runner:
         parameters=self.base()
         parameters.update({"common.img_en":1,"camera.model":"Pinhole","camera.width":640,"camera.height":360,
                            "camera.fx":328.,"camera.fy":327.,"camera.cx":319.,"camera.cy":179.,
-                           "extrin_calib.T_cl":[1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.],
+                           "extrin_calib.Rcl":[1.,0.,0.,0.,1.,0.,0.,0.,1.],
+                           "extrin_calib.Pcl":[0.,0.,0.],
                            "vio.img_point_cov":1000.5,"vio.outlier_threshold":999.5})
         process,log=self.start("fast_livo","fastlivo_mapping",parameters)
         self.spin(.5)
-        self.check(process.poll() is None,"visual startup accepts T_cl and fractional noise")
+        self.check(process.poll() is None,"visual startup accepts Rcl/Pcl and fractional noise")
         self.check(any(x.node_name=="laserMapping" for x in self.node.get_subscriptions_info_by_topic("/left_camera/image")),"visual startup creates image subscription")
         self.stop(process)
         self.check(process.returncode==0,"visual startup SIGINT exits cleanly")
@@ -214,6 +217,37 @@ class Runner:
         before=len(received);pose.pose.pose.position.x=9.;publisher.publish(pose);self.spin(.2)
         self.check(len(received)==before,"TF freezes the first valid alignment")
         self.stop(process);self.node.destroy_subscription(subscription);self.node.destroy_publisher(publisher)
+
+    def compressed_transport(self):
+        import cv2
+        import numpy as np
+        source=np.full((48,64,3),(40,120,200),dtype=np.uint8)
+        cases=[("default_base","/ultra_camera/image","/ultra_camera/image",".jpg","jpeg"),
+               ("separate_bases","/ultra_bag/image","/ultra_livo/image",".png","png")]
+        for label,input_base,output,extension,codec in cases:
+            received=[]
+            subscription=self.node.create_subscription(Image,output,received.append,10)
+            publisher=self.node.create_publisher(CompressedImage,input_base+"/compressed",10)
+            process,log=self.start("image_transport","republish",{
+                "in_transport":"compressed","out_transport":"raw"},
+                executable_prefix=Path(get_package_prefix("image_transport")),
+                extra_arguments=["-r","in/compressed:="+input_base+"/compressed","-r","out:="+output])
+            try:
+                encoded_ok,encoded=cv2.imencode(extension,source)
+                if not encoded_ok:raise RuntimeError("Cannot encode test image")
+                message=CompressedImage();message.header.stamp=self.node.get_clock().now().to_msg()
+                message.header.frame_id="test_camera";message.format="bgr8; "+codec+" compressed bgr8"
+                message.data=encoded.tobytes()
+                deadline=time.monotonic()+5.
+                while not received and time.monotonic()<deadline and process.poll() is None:
+                    publisher.publish(message);self.spin(.1)
+                self.check(received and (received[-1].width,received[-1].height,received[-1].encoding)==(64,48,"bgr8")
+                           and received[-1].header==message.header,codec+" "+label+" decompresses to Image and preserves header")
+                decoded=np.frombuffer(received[-1].data,dtype=np.uint8).reshape(source.shape)
+                difference=np.abs(decoded.astype(float)-source.astype(float)).mean()
+                self.check(difference<(2 if codec=="jpeg" else .01),codec+" "+label+" preserves expected pixels")
+            finally:
+                self.stop(process);self.node.destroy_publisher(publisher);self.node.destroy_subscription(subscription)
 
     def shutdown_stress(self, repetitions):
         for index in range(repetitions):
@@ -242,7 +276,7 @@ def main():
             runner.failures();runner.mapping();runner.mapping(prior=True)
             runner.mapping(gravity=True);runner.mapping(prior=True,gravity=True)
             runner.mapping(prior=True,sparse=True);runner.registration();runner.visual_start();runner.final_tf()
-            runner.shutdown_stress(args.shutdown_repeats)
+            runner.compressed_transport();runner.shutdown_stress(args.shutdown_repeats)
             report={"passed":len(runner.results),"checks":runner.results}
             (Path(os.environ.get("ULTRA_TEST_REPORT","/tmp/ultra-ros-test-report.json"))).write_text(json.dumps(report,ensure_ascii=False,indent=2))
             print("PASS",len(runner.results),"ROS integration checks")

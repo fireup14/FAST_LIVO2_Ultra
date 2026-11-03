@@ -27,7 +27,8 @@ def _setup(context):
         topic = parameters["common"]["img_topic"]
         source = LaunchConfiguration("image_input_topic").perform(context) or topic
         actions.append(Node(package="image_transport", executable="republish", name="image_republish",
-                            arguments=["compressed", "raw"], remappings=[("in", source), ("out", topic)],
+                            parameters=[{"in_transport": "compressed", "out_transport": "raw"}],
+                            remappings=[("in/compressed", source + "/compressed"), ("out", topic)],
                             respawn=LaunchConfiguration("use_respawn"), respawn_delay=2.0,
                             respawn_max_retries=5, output="screen"))
     actions.append(Node(package="rviz2", executable="rviz2", name="rviz2",

@@ -186,7 +186,7 @@ ros2 launch relocalization relocalization.launch.py config_file:=/home/fire/Desk
 
 相机参数支持 `camera.model/width/height/fx/...` 与 `cam_model/cam_width/cam_fx/...` 别名，并可由 YAML 或 ROS 命令行覆盖。缺失必需内参立即报错；不再反复查询同一份不完整参数。图像会按相机模型的目标尺寸调整，空图像与转换失败被丢弃。
 
-外参优先接受按行排列的 4×4 `extrin_calib.T_cl`，最后一行必须为 `[0,0,0,1]`；未提供时使用旧 `Rcl/Pcl`。矩阵长度、有限性、正交性、行列式和平移都经过检查。视觉噪声及离群阈值接受整数或浮点值。
+相机外参使用 `extrin_calib.Rcl`（按行排列的 9 个旋转矩阵元素）和 `extrin_calib.Pcl`（3 个平移分量），满足 `p_camera = Rcl * p_lidar + Pcl`。长度、有限性、旋转矩阵正交性及行列式都经过检查。视觉噪声及离群阈值接受整数或浮点值。
 
 仅有压缩图像时可启用可选解压：
 
@@ -195,6 +195,19 @@ ros2 launch fast_livo mapping_relocation.launch.py republish_compressed:=true us
 ```
 
 输入为 `common.img_topic + /compressed`，输出为 `common.img_topic` 的原始 Image；不同输入基话题可用 `image_input_topic:=/your/input`。需要 image_transport 的 compressed 插件；若 raw 话题已有发布者，不要重复转发。`use_respawn` 只控制解压进程，间隔 2 秒、最多重试 5 次，不重启滤波器，不检测算法丢失。纯 LIO 下开启解压会明确报错。
+
+这里的压缩是 JPEG/PNG 图像编码：原始话题类型为 `sensor_msgs/msg/Image`，压缩话题类型为 `sensor_msgs/msg/CompressedImage`。建图节点直接订阅前者，压缩输入通过独立解压进程转换后进入建图，不是把 `common.img_topic` 改成压缩话题就能直接接收。[ROS image_transport 教程](https://github.com/ros-perception/image_transport_tutorials)
+
+当前 `common.img_en=0`，图像链路默认关闭。启用视觉并解压时，默认使用以下映射：
+
+| 设置／数据 | 当前默认值 |
+| --- | --- |
+| `common.img_topic`，算法接收的原始图像 | `/camera/camera/color/image_raw` |
+| 实际压缩输入 | `/camera/camera/color/image_raw/compressed` |
+| `image_input_topic` | 留空时使用 `common.img_topic`；填写时给基话题，不带 `/compressed` |
+
+例如压缩输入为 `/bag/front/image/compressed` 时，可传 `image_input_topic:=/bag/front/image`，解压输出仍取 `common.img_topic`。相机名称不固定，但本 launch 的 compressed 插件按“基话题 + /compressed”订阅；其他命名需要额外 ROS remap。本机 Jazzy 的解压节点通过 `in_transport=compressed`、`out_transport=raw` 参数配置，并将 `in/compressed` 显式映射到实际压缩话题。解压保留图像头信息，不负责纠正曝光时间、标定或传感器同步。JPEG 会引入有损误差，解压也消耗 CPU；已有原始图像时可直接使用。
+
 
 ## 7. 坐标系与重力数学约定
 
@@ -216,6 +229,13 @@ B = T_map_camera_init = P * inverse(A)
 配准器内部、手动 `/initialpose` 及对齐调试云保持雷达位姿语义；`/icp_result` 已换算为 IMU 位姿，不要重复补外参。建图用自己实际的 A 计算 B，并在先验有效平面初始化成功后才发布最终 B。
 
 现在所有有先验模式的 TF 都等待建图最终结果，重力开关不影响这项就绪约束。TF 发布器校验 frame、有限位置和四元数，并固定首个有效结果。
+
+`map → camera_init` 的独立静态 TF 发布器 `transform_publisher` 由 `relocalization.launch.py` 启动；它订阅建图完成先验初始化后发布的 `/fast_livo2/initial_map_pose`。`mapping_relocation.launch.py` 启动的建图节点自身广播 `camera_init → aft_mapped` 动态 TF，两者分工不同。
+
+地图滑动是内存体素地图的窗口裁剪：设备相对上次裁剪位置移动达到 `sliding_thresh` 后，删除当前窗口外的体素，以限制普通建图的内存增长。它不修改坐标系或原始 PCD。当前 `half_map_size=100`、`voxel_size=0.5 m`，窗口每轴半宽约 50 m，`sliding_thresh=8.0 m`。先验模式不插入实时观测，也没有被裁区域的自动重载机制，故强制关闭滑动，避免走回原区域时失去先验匹配依据；普通建图仍由 `local_map.map_sliding_en` 控制。
+
+平面拟合从体素点云的协方差求法向、中心及不确定性，为点到平面的匹配残差提供几何约束，既参与建图也参与定位。原实现用通用 `EigenSolver`，主要按最小特征值判断是否平面；当前改为适用于实对称协方差的 `SelfAdjointEigenSolver`，并检查求解结果、第二特征值及其与最小值的间隔，排除近似直线／点和不稳定法向，避免不确定性计算中接近零的分母。这项改动会影响可用平面及匹配点的选择，不能等同于已经证明实机精度提高。[Eigen 求解器说明](https://libeigen.gitlab.io/eigen/docs-nightly/classEigen_1_1SelfAdjointEigenSolver.html)
+
 
 ## 8. 话题、时间戳与可靠性
 
@@ -240,6 +260,8 @@ B = T_map_camera_init = P * inverse(A)
 | `/fast_livo2/state6_stamped` | fast_livo/State6Stamped | 新接口，包含测量时间、机体系 frame、两向量和 valid |
 | `/fast_livo2/state6_imu_prop[_stamped]` | 对应原始／新消息 | 高频外推状态，需开启 `imu_rate_odom` |
 | `/LIVO2/imu_propagate` | Odometry，camera_init / aft_mapped | IMU 外推；有效频率由输入决定，不保证恒定 250 Hz |
+
+`state6` 的六个数按 `[wx, wy, wz, gx, gy, gz]` 排列：前三项是机体系去偏角速度，单位 rad/s；后三项是局部世界系负 Z 单位向量经 `Rᵀ` 投影到机体系后的方向，无量纲。它不含位置／速度，也不表示六个姿态角；关闭重力对齐时，负 Z 不保证与物理重力一致。新消息增加时间、frame 和 valid；独立的 `tracking_valid` 可报告失去约束，而失效帧会停止正常状态输出。外推版本需要开启 `uav.imu_rate_odom`，它提供估计量，不自动执行控制。
 
 Odometry 的 pose 在 header.frame_id 中，twist 在 child_frame_id 中。因此将局部 pose 转换到 map 时，不能把已经在机体系表达的 twist 再旋转一次。全局 TF 按里程计测量时间查询；静态 B 在所有测量时刻有效。初始配准协方差仍是占位近似，没有被当作额外滤波观测；全局输出协方差条件于该固定 B，不包含全局配准自身的不确定性。
 
@@ -419,7 +441,7 @@ ros2 launch relocalization relocalization.launch.py algorithm:=sac_ia_icp
 | `relocalization.timeout_seconds` | `120.0` | 真实配准总时间预算，秒；在库调用／回调边界检查。 |
 | `relocalization.result_hold_seconds` | `5.0` | 成功结果以 Transient Local 保留的秒数；随后退出求解器。 |
 
-可选 `extrin_calib.T_cl` 是长度 16 的按行排列矩阵；省略时读取 Rcl/Pcl。相机文件的 `camera.model/width/height/scale/fx/fy/cx/cy/d0/d1/d2/d3` 分别为模型、目标图像尺寸、比例、焦距、主点和畸变参数；焦距和主点单位像素。当前 Pinhole 640×360、scale=1.0，实际内参见 `camera_parameter.yaml`。
+相机外参只读取 `extrin_calib.Rcl/Pcl`。相机文件的 `camera.model/width/height/scale/fx/fy/cx/cy/d0/d1/d2/d3` 分别为模型、目标图像尺寸、比例、焦距、主点和畸变参数；焦距和主点单位像素。当前 Pinhole 640×360、scale=1.0，实际内参见 `camera_parameter.yaml`。
 
 关键区别：先验 `filter_size_map`、实时 `filter_size_surf`、内部 `lio.voxel_size`、RGB 输出 `filter_size_pcd` 是四个不同尺度。平面发布开关不关闭几何拟合。`half_map_size` 单位是根体素索引格数，0.5 m 体素时 100 约为半宽 50 m。`imu_int_frame` 在实现中按 IMU 样本累加，不是等待 30 帧雷达。
 
@@ -482,7 +504,7 @@ MPLBACKEND=Agg python3 /home/fire/Desktop/FAST_LIVO2_Ultra/src/FAST-LIVO2/test/t
 
 合成 ROS 检查默认使用独立域 179、仅本机发现，不启动雷达或相机，所有测试点云写临时目录。core_regression 直接调用实际算法／保存函数；ROS 脚本运行已安装程序；工具检查使用真实 Open3D 文件读写及受控 TSDF 替身，**不声称已经运行真实 VDBFusion 重建**。
 
-2026-11-03 当前代码验证：27 项实际核心函数检查、53 项隔离 ROS 合成流程检查及额外 20 次 SIGINT 退出压力检查（ROS 共 73 项）、7 项离线工具检查通过；目标工作空间 8 个包完整构建通过（1 分 51 秒），4 项实际 launch 启动检查通过。ROS 检查包含重力开／关、普通／先验四种流程、倾斜 IMU 初始化、视觉 T_cl 启动、最终 TF 校验、定位约束丢失与消息保留。真实 VDBFusion 后端未安装，网格检查仅覆盖封装、坐标和实际文件 I/O。 已修复 ROS 关闭与回调 wait-set 创建之间的退出竞态，正常关闭仍执行末尾 PCD 保存；ROS 运行期间的异常继续报错。
+2026-11-03 当前代码验证：27 项实际核心函数检查、57 项隔离 ROS 合成流程检查及额外 20 次 SIGINT 退出压力检查（ROS 共 77 项）、7 项离线工具检查通过；目标工作空间首轮 8 个包完整构建通过，本轮调整后 fast_livo 及工作空间依赖重新构建通过；4 项实际 launch 启动检查及 2 种实际 launch 图像传输场景通过。ROS 检查包含重力开／关、普通／先验四种流程、倾斜 IMU 初始化、视觉 Rcl/Pcl 启动、最终 TF 校验、定位约束丢失与消息保留，以及 JPEG/PNG 的真实解压、头信息与像素校验。真实 VDBFusion 后端未安装，网格检查仅覆盖封装、坐标和实际文件 I/O。 已修复 ROS 关闭与回调 wait-set 创建之间的退出竞态，正常关闭仍执行末尾 PCD 保存；ROS 运行期间的异常继续报错。
 
 ## 15. 来源与许可证
 

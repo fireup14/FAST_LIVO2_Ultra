@@ -83,10 +83,12 @@ int main(int argc, char **argv) {
 
     auto &vio=*mapper.vio_manager;
     rejects([&]{vio.setLidarToCameraExtrinsic(std::vector<double>{1},std::vector<double>{0});},"Short camera extrinsics accepted"); ++count;
-    std::vector<double> camera{1,0,0,0.1,0,1,0,0.2,0,0,1,0.3,0,0,0,1};
-    vio.setLidarToCameraExtrinsic(camera);
-    check(std::abs(vio.Pcl.x()-0.1)<1e-9,"T_cl translation wrong"); ++count;
-    camera[15]=2; rejects([&]{vio.setLidarToCameraExtrinsic(camera);},"Invalid homogeneous row accepted"); ++count;
+    std::vector<double> camera_rotation{1,0,0,0,1,0,0,0,1};
+    std::vector<double> camera_translation{0.1,0.2,0.3};
+    vio.setLidarToCameraExtrinsic(camera_rotation,camera_translation);
+    check(vio.Pcl.isApprox(V3D(0.1,0.2,0.3)) && vio.Rcl.isIdentity(),"Rcl/Pcl extrinsics wrong"); ++count;
+    camera_rotation[0]=2;
+    rejects([&]{vio.setLidarToCameraExtrinsic(camera_rotation,camera_translation);},"Non-orthonormal camera rotation accepted"); ++count;
     cv::Mat empty; std::vector<pointWithVar> pv;
     vio.processFrame(empty,pv,mapper.voxel_map,0); ++count;
 
