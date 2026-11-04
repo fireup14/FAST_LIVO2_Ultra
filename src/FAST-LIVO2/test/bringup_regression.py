@@ -63,6 +63,7 @@ def inspect_launch(name,config,driver_config):
     assert mapping['prior_map_name']=='prior.pcd' and mapping['locate_in_prior_map']==(name=='relocate_mapping.launch.py')
     assert mapping['prior_map_update_en'] is True
     if 'teaser_gicp_node' in nodes:
+        assert nodes['teaser_gicp_node']['workspace_root']==mapping['workspace_root']
         assert nodes['teaser_gicp_node']['prior_map_path']==mapping['prior_map_path']
         assert nodes['teaser_gicp_node']['prior_map_name']==mapping['prior_map_name']
         assert 'locate_in_prior_map' not in nodes['teaser_gicp_node']
@@ -75,10 +76,10 @@ def inspect_launch(name,config,driver_config):
 def configuration(share,directory,prior):
     data=yaml.safe_load((share/'config/mapping_relocation.yaml').read_text())
     p=data['/**']['ros__parameters']
-    p.update(locate_in_prior_map=prior,prior_map_path=str(directory),prior_map_name='prior.pcd')
+    p.update(locate_in_prior_map=prior,workspace_root=str(directory),prior_map_path='.',prior_map_name='prior.pcd')
     p['time_check']['enabled']=False;p['common']['img_en']=0
     p['pcd_save'].update(pcd_save_en=True,pcd_save_en_relocate=True,
-                         output_dir=str(directory/'collected'),output_dir_relocate=str(directory/'relocated'))
+                         output_dir='collected',output_dir_relocate='relocated')
     p['extrin_calib']['extrinsic_R']=[1.,0.,0.,0.,1.,0.,0.,0.,1.]
     p['extrin_calib']['extrinsic_T']=[0.,0.,0.]
     p['preprocess'].update(point_filter_num=1,filter_size_surf=.02,filter_size_map=.02,blind=.1)
@@ -149,7 +150,8 @@ def main():
     args=parser.parse_args()
     share=Path(get_package_share_directory('fast_livo'))
     with tempfile.TemporaryDirectory(prefix='ultra-bringup-regression-') as temporary:
-        directory=Path(temporary)
+        directory=Path(temporary)/'workspace with spaces'
+        directory.mkdir()
         configs=[configuration(share,directory,prior) for prior in (False,True)]
         driver=yaml.safe_load((Path(get_package_share_directory('livox_ros_driver2'))/'config/msg_MID360.yaml').read_text())
         driver['driver_parameters']['frame_id']='bringup_driver_frame'

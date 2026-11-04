@@ -132,12 +132,18 @@ public:
             "prior_map", rclcpp::QoS(1).transient_local().reliable());
         transformed_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("transformed_cloud", 10);
 
-        const std::filesystem::path directory(prior_map_path_);
+        const auto workspace_root = this->declare_parameter<std::string>("workspace_root", "");
+        std::filesystem::path directory(prior_map_path_);
+        if (!workspace_root.empty()) {
+            const std::filesystem::path root(workspace_root);
+            if (!root.is_absolute()) throw std::invalid_argument("workspace_root must be an absolute directory path.");
+            if (!directory.empty() && !directory.is_absolute()) directory = root / directory;
+        }
         const std::filesystem::path filename(this->get_parameter("prior_map_name").as_string());
         if (!directory.is_absolute() || filename.empty() || filename.has_parent_path() ||
             filename == "." || filename == "..") {
             throw std::invalid_argument(
-                "Prior localization requires an absolute prior_map_path directory and a plain prior_map_name filename.");
+                "Prior localization requires an absolute prior_map_path directory (or a path relative to workspace_root) and a plain prior_map_name filename.");
         }
         prior_map_path_ = (directory / filename).lexically_normal().string();
         initialize_pose_conversion();

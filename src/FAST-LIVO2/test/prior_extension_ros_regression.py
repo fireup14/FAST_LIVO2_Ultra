@@ -48,21 +48,21 @@ def saved_points(file):
 
 
 def scenario(runner, extend):
-    directory = runner.temporary / ("extension" if extend else "fixed")
-    directory.mkdir()
+    directory = runner.temporary / "workspace with spaces" / ("extension" if extend else "fixed")
+    directory.mkdir(parents=True)
     source = directory / "prior.pcd"
     runner.write_map(source, cluster(0))
     original = hashlib.sha256(source.read_bytes()).digest()
     parameters = runner.base()
     parameters.update({
         "locate_in_prior_map": True, "prior_map_update_en": extend,
-        "prior_map_path": str(directory), "prior_map_name": source.name,
+        "workspace_root": str(directory), "prior_map_path": ".", "prior_map_name": source.name,
         "uav.gravity_align_en": False, "publish.dense_map_en": True,
         "preprocess.filter_size_map": .01, "preprocess.filter_size_surf": .01,
         "lio.voxel_size": .5, "lio.min_eigen_value": .0025, "lio.max_layer": 2,
         "lio.beam_err": .05, "lio.dept_err": .02, "lio.sigma_num": 3.,
         "pcd_save.pcd_save_en": True, "pcd_save.pcd_save_en_relocate": True,
-        "pcd_save.output_dir_relocate": str(directory / "output"), "pcd_save.interval": -1})
+        "pcd_save.output_dir_relocate": "output", "pcd_save.interval": -1})
     valid, poses, clouds, initial, global_pose = [], [], [], [], []
     subscriptions = [
         runner.node.create_subscription(Bool, "/fast_livo2/tracking_valid", valid.append, runner.qos),

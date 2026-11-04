@@ -1,6 +1,6 @@
 # FAST_LIVO2_Ultra
 
-MID360 / MID360S + IMU 的 ROS 2 建图、先验地图定位与连续扩图工作空间。当前适配环境为 **Ubuntu 24.04、ROS 2 Jazzy、Livox-SDK2 1.5.2**。
+MID360 / MID360S + IMU 的 ROS 2 建图、先验地图定位与连续扩图工作空间。PC 环境为 **Ubuntu 24.04、ROS 2 Jazzy**；RDK 现场环境为 **Ubuntu 22.04.5、ROS 2 Humble**，两者均使用 **Livox-SDK2 1.5.2**。RDK 的构建记录与尚未完成的实机验收见第 2.1 节。
 
 本文件是工程的统一操作与维护文档，合并原中英文 README、差异记录、注意事项及本地参数／重定位说明。驱动与 SDK 配套另见 [版本.md](/home/fire/Desktop/FAST_LIVO2_Ultra/src/livox_ros_driver2/版本.md)。源代码和实际 YAML 是运行状态的依据。第三方库的许可证、上游 README 和引用资料保留在各自目录。
 
@@ -35,9 +35,13 @@ MID360 / MID360S + IMU 的 ROS 2 建图、先验地图定位与连续扩图工�
 
 当前配置为先验模式、`prior_map_update_en=true` 连续扩图、重力对齐开启和观测保存开启。新增开关在 C++ 中缺省为 false，旧配置不增加该项时保持固定先验定位；本工程 YAML 显式启用扩图。参数在启动时读取，更改后重新构建并重启。固定目录分别为 `PCD/priori`（采集输出）、`PCD/relocate`（定位观测输出）、`PCD/map`（先验输入）；通常只修改 `prior_map_name` 选择地图。
 
+`mapping_relocation.yaml` 中的文件目录统一基于 `workspace_root` 解析；迁移到其他电脑或 RDK，只需将它改为工程的实际绝对路径，例如 `/home/sunrise/Desktop/FAST_LIVO2_Ultra`。`PCD/map`、`PCD/priori`、`PCD/relocate` 和 `images` 均为相对目录，不受启动终端当前目录影响。仍兼容显式绝对目录覆盖；`prior_map_name` 继续单独选择文件。
+
 ## 2. 获取、依赖与构建
 
-仓库本身就是 colcon 工作空间，不需要再套一层 `humble/src`：
+仓库本身就是 colcon 工作空间，不需要再套一层 `humble/src`。下方及后文未单独注明的 `/home/fire/...`、`/opt/ros/jazzy/...` 命令属于 PC 示例；RDK 按第 2.1 节加载 Humble，并使用板端实际路径。
+
+PC 获取与构建：
 
 ```bash
 cd /home/fire/Desktop
@@ -65,9 +69,39 @@ source /home/fire/Desktop/FAST_LIVO2_Ultra/install/setup.bash
 
 若修改 Vikit 或驱动，需同时重建对应依赖包；不能仅构建 fast_livo。每个运行终端均须 source 同一工作空间。不要同时 source 旧 Ultra 和本工程，否则包查找与动态库可能混用。
 
+### 2.1 RDK 环境与迁移配置
+
+| 项目 | PC 当前配置 | RDK 现场记录 |
+| --- | --- | --- |
+| 系统／ROS | Ubuntu 24.04／Jazzy | Ubuntu 22.04.5／Humble |
+| 工程根目录 | `/home/fire/Desktop/FAST_LIVO2_Ultra` | `/home/sunrise/Desktop/FAST_LIVO2_Ultra` |
+| SDK 源码目录 | `/home/fire/third_party/Livox-SDK2` | `/home/sunrise/third_party/Livox-SDK2` |
+| 雷达型号 | MID360 | MID360S |
+| 主机网卡 IP | `192.168.2.50` | `192.168.2.100` |
+| 雷达 IP | `192.168.2.3` | `192.168.2.3` |
+
+这些是两台设备的配置实例，IP 须以实际网卡和雷达为准。当前仓库保留 PC 默认值，迁移到 RDK 时核对：
+
+- 算法 YAML 的 `workspace_root` 改为板端实际工程根目录；地图和图像相对目录通常不改。
+- 驱动 `config/msg_MID360.yaml` 的 `lidar_model` 选为 `mid360s`。
+- 驱动 `config/MID360s_config.json` 的 `host_net_info` 中 `host_ip` 与板端网卡一致，记录中的 RDK 为 `192.168.2.100`；雷达 IP 保持与设备实际地址一致。
+
+RDK 已获取工程并安装依赖后，在板端构建：
+
+```bash
+source /opt/ros/humble/setup.bash
+cd /home/sunrise/Desktop/FAST_LIVO2_Ultra
+CMAKE_BUILD_PARALLEL_LEVEL=2 MAKEFLAGS=-j2 colcon build --executor sequential
+source /home/sunrise/Desktop/FAST_LIVO2_Ultra/install/setup.bash
+```
+
+每个 RDK 运行终端均先加载上述 Humble 和板端安装空间；两个一键 launch 命令与 PC 相同。修改源码 YAML／JSON 后，先重建对应包同步安装配置，再启动。SDK 安装前缀两端均为 `/usr/local`；已安装指定版本时无需重装。
+
+依据 [CHANGELOG.md](/home/fire/Desktop/FAST_LIVO2_Ultra/CHANGELOG.md) 的 RDK 历史记录：Humble 下全部 8 个包曾构建通过，SDK 已核对为 1.5.2，修正主机 IP 后配准器已收到点云。先验配准成功、连续扩图、频率与时间戳质量尚未完成实机验收。RDK 的 RViz 启动 `-11` 尚未排查，驱动退出 `-11` 暂不处理；两项均未修复。
+
 ## 3. Livox 驱动、SDK 与网口
 
-使用工程内适配驱动，版本宏为 1.2.6；仅宏相同的上游驱动不能替代本地适配。该版本包含 ROS 2 包布局、Jazzy typesupport、SDK 设备枚举兼容及 Sampling 状态修复。
+使用工程内适配驱动，版本宏为 1.2.6；仅宏相同的上游驱动不能替代本地适配。该版本包含 ROS 2 包布局、Humble／Jazzy typesupport、SDK 设备枚举兼容及 Sampling 状态修复。
 
 配套 SDK：**Livox-SDK2 1.5.2，提交 `c0796f04c143143899c87a773d9f6b7136453c0b`**，安装前缀 `/usr/local`。SDK 是系统共享依赖，不是某个工作空间的私有安装。
 
@@ -98,7 +132,7 @@ sudo ldconfig
 | `mid360` | `MID360_config.json` | `MID360` |
 | `mid360s` | `MID360s_config.json` | `Mid360s` |
 
-型号忽略大小写，其他值明确报错。一次选一种型号；更换后停止原驱动再启动。两份 JSON 当前均为雷达 `192.168.2.3`、主机 `192.168.2.50`，电脑接雷达的网卡需配置对应主机地址。两台同时在线时不能共用同一设备 IP。
+型号忽略大小写，其他值明确报错。一次选一种型号；更换后停止原驱动再启动。仓库内两份 JSON 默认均为雷达 `192.168.2.3`、主机 `192.168.2.50`，电脑接雷达的网卡需配置对应主机地址；第 2.1 节的 RDK 实例使用 MID360S，其 JSON 的主机地址需改为实际板端地址 `192.168.2.100`。两台同时在线时不能共用同一设备 IP。
 
 `driver_parameters.xfer_format=1` 输出 CustomMsg，`multi_topic=0` 使用 `/livox/lidar` 与 `/livox/imu`，`publish_freq=10.0`。设备型号由驱动选择，算法里的 `lidar_type=1` 只表示 Livox CustomMsg 预处理分支。
 
@@ -321,7 +355,7 @@ pcd_save.pcd_save_en && (!locate_in_prior_map || pcd_save.pcd_save_en_relocate)
 
 `interval` 对有无先验两种模式都生效，是有效保存调用／处理帧数，不是秒；负数退出保存整图，正数分段并在退出时补存尾部；可捕获异常也尽力保存此前有效缓存，保存失败明确报错。0 被拒绝，关闭保存使用总开关；先验模式还需 `pcd_save.pcd_save_en_relocate=true`。纯 LIO 保存保留强度，不另外按 `filter_size_pcd` 降采样。写盘错误会报错，不打印虚假的保存成功。整图累计内存随观测增加，长时间采集宜使用分段保存。
 
-独立图像保存使用 `image_save.img_save_en/interval/output_dir`，需要开启视觉，与 PCD 总开关独立。COLMAP 导出需要视觉、Pinhole 模型、有效 PCD 保存及 `type=0`；输出到当前会话的 `_colmap` 子目录，使用 filesystem 创建，不运行 ROS1 命令，不清空其他会话。
+独立图像保存使用 `image_save.img_save_en/interval/output_dir`，需要开启视觉，与 PCD 总开关独立。输入地图、两种 PCD 输出和图像输出的相对目录均以 `workspace_root` 为基准，进入任何终端目录启动均得到同一组路径。COLMAP 导出需要视觉、Pinhole 模型、有效 PCD 保存及 `type=0`；输出到当前会话的 `_colmap` 子目录，使用 filesystem 创建，不运行 ROS1 命令，不清空其他会话。
 
 先验扩图更新的是在线体素地图；`PCD/relocate` 仍只保存本次有效观测，不自动拼入旧先验。`pcd_save.type=-1` 在两种先验模式下仍解析为 2，输出保持原 `map` 坐标。完整地图使用下方离线 merge 脚本生成。
 
@@ -368,7 +402,7 @@ python3 /home/fire/Desktop/FAST_LIVO2_Ultra/PCD/scripts/merge_maps.py
 ros2 launch relocalization relocalization.launch.py algorithm:=sac_ia_icp
 ```
 
-不要再使用已删除的 old/example 启动文件。直接 `ros2 run` 启动配准节点时，须提供当前 `prior_map_path`（目录）、`prior_map_name`（文件名）和外参参数；配准节点仅用于先验定位，不再读取模式或重力对齐开关，重力对齐仍由建图节点完成。原 `map_path/target_pcd_file` 等分裂接口已被统一。标准点云可在共享 YAML 的 `relocalization.pcl_type` 设为 `standard`，输入 `/pointcloud2`；默认 Livox 输入为原始雷达点，不能用改话题名称把 CustomMsg 当成 PointCloud2，也不要把已经注册到世界系的点云重复当原始雷达云。
+不要再使用已删除的 old/example 启动文件。直接 `ros2 run` 启动配准节点时，须提供当前 `prior_map_path`（绝对目录，或配合绝对 `workspace_root` 使用相对目录）、`prior_map_name`（文件名）和外参参数；配准节点仅用于先验定位，不再读取模式或重力对齐开关，重力对齐仍由建图节点完成。原 `map_path/target_pcd_file` 等分裂接口已被统一。标准点云可在共享 YAML 的 `relocalization.pcl_type` 设为 `standard`，输入 `/pointcloud2`；默认 Livox 输入为原始雷达点，不能用改话题名称把 CustomMsg 当成 PointCloud2，也不要把已经注册到世界系的点云重复当原始雷达云。
 
 | 配准参数 | launch 默认值 | 含义 |
 | --- | --- | --- |
@@ -399,9 +433,10 @@ ros2 launch relocalization relocalization.launch.py algorithm:=sac_ia_icp
 
 | 参数 | 当前值 | 含义 |
 | --- | --- | --- |
+| `workspace_root` | `"/home/fire/Desktop/FAST_LIVO2_Ultra"` | YAML 中全部文件目录的统一根目录，必须为非空绝对路径；迁移时只改此项，不支持 `~` 或环境变量替换。未配置时，建图节点使用编译时工作空间目录；旧绝对路径配置仍兼容。 |
 | `locate_in_prior_map` | `true` | `false`：实时观测初始化建图；`true`：加载先验，通过初值服务重定位后按扩图开关运行。不会自动启动外部配准节点。 |
 | `prior_map_update_en` | `true` | 仅 `locate_in_prior_map=true` 时决定是否将成功扫描加入在线地图；false 为固定先验定位，true 为连续扩图。C++ 缺省 false，本 YAML 显式 true；不覆盖输入 PCD，不改变本次观测保存范围。 |
-| `prior_map_path` | `"/home/fire/Desktop/FAST_LIVO2_Ultra/PCD/map"` | 固定先验输入目录，与 prior_map_name 拼成完整路径；只在先验模式加载，普通建图忽略。 |
+| `prior_map_path` | `"PCD/map"` | 相对 workspace_root 的先验输入目录，再与 prior_map_name 拼成完整路径；也兼容绝对目录，建图与配准共用同一根目录。 |
 | `prior_map_name` | `"priori.pcd"` | 先验文件名，不含目录；通常只需修改此项。文件须已放入上述输入目录，建图与配准器共用。 |
 | `time_check.enabled` | `true` | FAST-LIVO2 启动时只读检查 Linux 系统时钟同步状态。未同步、时钟异常或查询失败时立即打印原因并以错误码 1 退出，不创建输出文件、不订阅传感器或进入建图。关闭时打印“时间校验已关闭”，允许使用未经校验的当前系统时间继续运行。代码默认值也为 `true`。 |
 | `common.img_topic` | `"/camera/camera/color/image_raw"` | 原始 sensor_msgs/Image 话题；仅 img_en=1 时创建订阅。不会启动相机。 |
@@ -482,7 +517,7 @@ ros2 launch relocalization relocalization.launch.py algorithm:=sac_ia_icp
 | `localization.max_unconstrained_frames` | `5` | 两种有先验模式连续估计失败的帧数上限；达到后尽力保存有效缓存，再保留原错误退出，需要核查并重启。 |
 | `image_save.img_save_en` | `false` | 独立图像保存开关；要求 img_en=1，不依赖 PCD 总开关。 |
 | `image_save.interval` | `1` | 每隔多少次图像／RGB 发布调用保存图像，正整数。 |
-| `image_save.output_dir` | `"/home/fire/Desktop/FAST_LIVO2_Ultra/images"` | 图像保存绝对目录，启用时自动创建。 |
+| `image_save.output_dir` | `"images"` | 图像保存目录，相对 workspace_root 解析，也兼容绝对目录；启用时自动创建。 |
 | `relocalization.num_threads` | `4` | 配准器和 OpenMP 线程数，正整数；默认从 16 收敛为 4。 |
 | `relocalization.max_attempts` | `300` | 真实配准输入帧尝试次数上限，正整数。 |
 | `relocalization.timeout_seconds` | `120.0` | 真实配准计算阶段时间预算，秒；在库调用／回调边界检查。 |
@@ -527,15 +562,18 @@ Vikit Python 包已改为 setuptools / ament_python，`RosNode` 使用 `ros2 run
 | 没有 map 系里程计 | 检查最终建图初值和 TF 发布器；普通建图缺少 map TF 时局部输出仍可正常工作 |
 | 找不到 small_gicp / TEASER 特征目标 | 首次完整构建，保留 teaserpp 的 colcon.pkg，确认 source 当前安装空间 |
 | Livox SDK 动态库缺失 | 检查固定版本安装、`ldconfig -p`、/usr/local/lib 与程序动态链接，勿混用其他工作空间库 |
+| Livox 启动 bind failed | 核对所选 JSON 的 `host_ip` 是否为当前主机网卡已有的地址；RDK 现场为 `192.168.2.100`，仓库默认仍为 `192.168.2.50`；修改 JSON 后重建驱动 |
+| RDK RViz 启动后 -11 | 尚未排查，未修复；可用 `enable_rviz:=false` 进行无界面运行，这不代表图形问题已解决 |
+| RDK 驱动 Ctrl+C 后 -11 | 暂不处理，根因未确认，驱动正常退出尚未通过实机验收 |
 | compressed 插件缺失 | 安装当前 ROS 发行版的 compressed image transport 插件，仅视觉解压需要 |
-| 保存没有生成文件 | 检查两个权限开关、有效观测、绝对目录、interval 和终端保存结果；先验模式不自动合并旧图 |
+| 保存没有生成文件 | 检查两个权限开关、有效观测、workspace_root 及解析后的目录、interval 和终端保存结果；先验模式不自动合并旧图 |
 | CPU 高或延迟增加 | 检查配准预算、线程数、地图点数及日志开关；关闭不需要的平面显示、图像解压和视觉输入 |
 
 历史实机证据：2026-10-30 用户确认普通 LIO 正常；2026-11-02 用户确认旧图 1549、关闭重力、先验滤波 0.1 时持续定位不再漂移。此前 0.5 先验滤波曾把约 220 万点降成 528 点，实际体素没有有效平面。该旧图已不在当前仓库，不能直接沿用旧命令路径。
 
 历史地图中，2327 与 posteriori 字节相同，2329 与 priori 字节相同；文件名不能证明采集方式。当前旧地图已由用户移除，新流程按需采集并把选定文件放入固定输入目录；开发回归只使用临时地图。
 
-本轮提供核心函数、合成 ROS 流程及离线工具回归，不把历史测试计数机械相加为当前实机验收。开启视觉、MID360S 实机、TEASER/SAC-IA 的跨场景成功率、重力开启后长期定位精度和 CPU 峰值，仍需对应设备／数据验证。
+本轮提供核心函数、合成 ROS 流程及离线工具回归，不把历史测试计数机械相加为当前实机验收。开启视觉、MID360S 实机完整流程、TEASER/SAC-IA 的跨场景成功率、重力开启后长期定位精度和 CPU 峰值，仍需对应设备／数据验证。
 
 ## 14. 回归检查
 
@@ -556,6 +594,8 @@ MPLBACKEND=Agg python3 /home/fire/Desktop/FAST_LIVO2_Ultra/src/FAST-LIVO2/test/t
 2026-11-03 先验专用精简后验证：relocalization 重新编译通过，95 项隔离 ROS 合成检查和 5 项启动入口场景通过。新增覆盖无先验配置拒绝、五个配准入口的有效先验启动、TF 固定订阅及其输入／输出双方晚启动交付；此前 43 项核心函数检查已通过，建图算法代码本轮未修改。初值服务检查覆盖非法位姿拒绝、接受后才创建订阅、重复请求不重复初始化、建图晚启动、响应丢失后的相同请求重试、明确拒绝与超时，以及配准器在先验初始化完成前凭接受响应正常退出。原有重力开／关、普通／先验流程、约束丢失、最终 TF、视觉启动和 JPEG/PNG 解压检查也通过；组合入口实际运行时关闭硬件驱动，验证定位及单次 SIGINT 退出保存，所有地图只写临时目录。
 
 2026-11-04 连续扩图验证：fast_livo 编译通过，43 项原核心检查、110 项新增核心检查、29 项扩图 DDS 检查、95 项原 ROS 检查及 5 个组合启动场景通过。新增核心检查使用已知预测位姿的重叠扫描，覆盖普通／固定先验／扩图三种模式、离开原先验后的新体素匹配、非单位地图变换、滑动裁剪、失败帧隔离、异常退出保图和保存失败仍保留原错误。扩图 DDS 检查运行实际节点，核对初值服务、最终 TF、地图位姿、成功扫描与保存点数一致及先验文件未改变；启动场景使用分离的正交平面，避免小角点跨体素边界导致的几何歧义。测试均未启动实机驱动，不能代替真实路线的漂移、重影和长时间运行验收。
+
+2026-11-04 统一路径根目录验证：fast_livo 和 relocalization 构建通过，59 项核心配置／保存检查、110 项扩图核心检查、29 项扩图 DDS 检查、95 项原 ROS 检查及 5 个组合启动场景通过。覆盖更换根目录、普通／先验输出切换、相对路径归一化、带空格目录、旧绝对路径覆盖、非法根目录拒绝，以及实际建图与配准共用根目录加载地图、异常退出保存观测。全部使用本机隔离 ROS 域和临时点云，未在 RDK 实机执行。
 
 先前适配还通过了完整工作空间构建、7 项离线工具检查、20 次 SIGINT 压力检查、独立 launch、实际 launch 图像传输及含空格先验文件名检查。真实 VDBFusion 后端未安装，网格检查仅覆盖封装、坐标和实际文件 I/O；合成检查不代表已经验证实机精度或长期运行表现。
 

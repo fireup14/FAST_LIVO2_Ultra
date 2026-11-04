@@ -136,7 +136,16 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
     }
   };
 
-  const auto pcd_root = (std::filesystem::path(ROOT_DIR) / "../../PCD").lexically_normal();
+  const auto default_workspace_root = (std::filesystem::path(ROOT_DIR) / "../..").lexically_normal();
+  const std::filesystem::path workspace_root(try_declare.template operator()<std::string>(
+      "workspace_root", default_workspace_root.string()));
+  if (workspace_root.empty() || !workspace_root.is_absolute())
+    throw std::invalid_argument("workspace_root must be a non-empty absolute directory path.");
+  const auto resolve_directory = [&workspace_root](const std::string &value) {
+    const std::filesystem::path directory(value);
+    if (directory.empty()) return value;  // Preserve validation of empty enabled paths below.
+    return (directory.is_absolute() ? directory : workspace_root / directory).lexically_normal().string();
+  };
 
   // declare parameter
   try_declare.template operator()<std::string>("common.lid_topic", "/livox/lidar");
@@ -195,8 +204,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<int>("pcd_save.interval", -1);
   try_declare.template operator()<bool>("pcd_save.pcd_save_en", false);
   try_declare.template operator()<bool>("pcd_save.pcd_save_en_relocate", false);
-  try_declare.template operator()<std::string>("pcd_save.output_dir", (pcd_root / "priori").string());
-  try_declare.template operator()<std::string>("pcd_save.output_dir_relocate", (pcd_root / "relocate").string());
+  try_declare.template operator()<std::string>("pcd_save.output_dir", "PCD/priori");
+  try_declare.template operator()<std::string>("pcd_save.output_dir_relocate", "PCD/relocate");
   try_declare.template operator()<bool>("pcd_save.colmap_output_en", false);
   try_declare.template operator()<double>("pcd_save.filter_size_pcd", 0.5);
   try_declare.template operator()<vector<double>>("extrin_calib.extrinsic_T", vector<double>{});
@@ -214,7 +223,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
 
   try_declare.template operator()<bool>("locate_in_prior_map", false);//『GT』
   try_declare.template operator()<bool>("prior_map_update_en", false);
-  try_declare.template operator()<string>("prior_map_path", (pcd_root / "map").string());
+  try_declare.template operator()<string>("prior_map_path", "PCD/map");
   try_declare.template operator()<string>("prior_map_name", "");
 
   try_declare.template operator()<double>("time_offset.imu_time_offset", 0.0);
@@ -227,7 +236,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<int>("pcd_save.type", -1);
   try_declare.template operator()<bool>("image_save.img_save_en", false);
   try_declare.template operator()<int>("image_save.interval", 1);
-  try_declare.template operator()<std::string>("image_save.output_dir", std::string(ROOT_DIR) + "Log/image");
+  try_declare.template operator()<std::string>("image_save.output_dir", "images");
 
   // get parameter
   this->node->get_parameter("common.lid_topic", lid_topic);
@@ -305,6 +314,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("locate_in_prior_map", locate_in_prior_map);//『GT』
   this->node->get_parameter("prior_map_update_en", prior_map_update_en);
   this->node->get_parameter("prior_map_path", prior_map_path); //『GT』
+  prior_map_path = resolve_directory(prior_map_path);
   node->get_parameter("time_offset.imu_time_offset", imu_time_offset);
   node->get_parameter("imu.b_acc_cov", b_acc_cov);
   node->get_parameter("imu.b_gyr_cov", b_gyr_cov);
@@ -325,9 +335,11 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
       throw std::invalid_argument("Prior localization requires an absolute prior_map_path directory and a plain prior_map_name filename.");
     prior_map_path = (directory / filename).lexically_normal().string();
   }
+  pcd_output_dir = resolve_directory(pcd_output_dir);
   node->get_parameter("image_save.img_save_en", img_save_en);
   node->get_parameter("image_save.interval", img_save_interval);
   node->get_parameter("image_save.output_dir", image_output_dir);
+  image_output_dir = resolve_directory(image_output_dir);
   p_pre->log_points = log_sensor;
   if (extrinR.size() != 9 || extrinT.size() != 3) throw std::invalid_argument("LiDAR-to-IMU extrinsics require 9 rotation and 3 translation values.");
   M3D rotation; rotation << MAT_FROM_ARRAY(extrinR);

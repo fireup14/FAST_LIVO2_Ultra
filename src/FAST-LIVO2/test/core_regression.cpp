@@ -65,6 +65,32 @@ int main(int argc, char **argv) {
     check(mapper.pcd_save_in_localization,"Renamed localization save switch ignored"); ++count;
     read_profile(false,-1);
 
+    const auto original_root=mapper.node->get_parameter("workspace_root").as_string();
+    const auto original_images=mapper.node->get_parameter("image_save.output_dir").as_string();
+    for (const std::string root : {"/tmp/ultra-root", "/tmp/rdk workspace with spaces"}) {
+      for (bool prior : {false,true}) {
+        mapper.node->set_parameters({
+          rclcpp::Parameter("workspace_root",root), rclcpp::Parameter("locate_in_prior_map",prior),
+          rclcpp::Parameter("prior_map_path","PCD/./map"), rclcpp::Parameter("prior_map_name","prior map.pcd"),
+          rclcpp::Parameter("pcd_save.output_dir","PCD/priori"),
+          rclcpp::Parameter("pcd_save.output_dir_relocate","PCD/relocate"),
+          rclcpp::Parameter("image_save.output_dir","images")});
+        mapper.readParameters(mapper.node);
+        check(mapper.prior_map_path==root+"/PCD/map"+(prior ? "/prior map.pcd" : ""),"Relative prior path did not follow workspace_root"); ++count;
+        check(mapper.pcd_output_dir==root+(prior ? "/PCD/relocate" : "/PCD/priori"),"Mode-specific save path did not follow workspace_root"); ++count;
+        check(mapper.image_output_dir==root+"/images","Image path did not follow workspace_root"); ++count;
+      }
+    }
+    mapper.node->set_parameter(rclcpp::Parameter("image_save.output_dir","/tmp/absolute-images"));
+    read_profile(true,-1);
+    check(mapper.prior_map_path=="/tmp/ultra-input/prior map.pcd" && mapper.pcd_output_dir=="/tmp/ultra-relocate" && mapper.image_output_dir=="/tmp/absolute-images","Absolute path overrides were prefixed unexpectedly"); ++count;
+    for (const char *root : {"", "relative/workspace", "~/Desktop/FAST_LIVO2_Ultra"}) {
+      mapper.node->set_parameter(rclcpp::Parameter("workspace_root",root));
+      rejects([&]{mapper.readParameters(mapper.node);},"Non-absolute workspace_root was accepted"); ++count;
+    }
+    mapper.node->set_parameters({rclcpp::Parameter("workspace_root",original_root),rclcpp::Parameter("image_save.output_dir",original_images)});
+    read_profile(false,-1);
+
     mapper.last_timestamp_lidar=100.0;
     mapper.last_timestamp_imu=99.0;
     auto imu=std::make_shared<sensor_msgs::msg::Imu>();
