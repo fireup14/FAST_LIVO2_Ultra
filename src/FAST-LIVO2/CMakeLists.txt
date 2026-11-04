@@ -203,11 +203,13 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
-  add_executable(core_regression test/core_regression.cpp)
-  ament_target_dependencies(core_regression ${dependencies})
-  target_link_libraries(core_regression laser_mapping vio lio pre imu_proc ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${Boost_LIBRARIES} fmt::fmt)
-  add_test(NAME core_regression COMMAND core_regression)
-  set_tests_properties(core_regression PROPERTIES ENVIRONMENT "ROS_DOMAIN_ID=179;ROS_LOCALHOST_ONLY=1;ROS_LOG_DIR=/tmp/ultra-core-ros-logs")
+  foreach(regression core_regression prior_extension_regression)
+    add_executable(${regression} test/${regression}.cpp)
+    ament_target_dependencies(${regression} ${dependencies})
+    target_link_libraries(${regression} laser_mapping vio lio pre imu_proc ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${Boost_LIBRARIES} fmt::fmt)
+    add_test(NAME ${regression} COMMAND ${regression})
+    set_tests_properties(${regression} PROPERTIES ENVIRONMENT "ROS_DOMAIN_ID=179;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_LOG_DIR=/tmp/ultra-core-ros-logs")
+  endforeach()
 endif()
 
 # Install the executable

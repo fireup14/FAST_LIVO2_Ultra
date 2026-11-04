@@ -26,6 +26,7 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from std_msgs.msg import Bool
 from ros_regression import Runner
+from prior_extension_ros_regression import cluster
 
 
 class ParameterLoader(yaml.SafeLoader):
@@ -60,6 +61,7 @@ def inspect_launch(name,config,driver_config):
     assert nodes['livox_ros_driver2_node']['frame_id']=='bringup_driver_frame'
     mapping=nodes['fastlivo_mapping']
     assert mapping['prior_map_name']=='prior.pcd' and mapping['locate_in_prior_map']==(name=='relocate_mapping.launch.py')
+    assert mapping['prior_map_update_en'] is True
     if 'teaser_gicp_node' in nodes:
         assert nodes['teaser_gicp_node']['prior_map_path']==mapping['prior_map_path']
         assert nodes['teaser_gicp_node']['prior_map_name']==mapping['prior_map_name']
@@ -79,7 +81,7 @@ def configuration(share,directory,prior):
                          output_dir=str(directory/'collected'),output_dir_relocate=str(directory/'relocated'))
     p['extrin_calib']['extrinsic_R']=[1.,0.,0.,0.,1.,0.,0.,0.,1.]
     p['extrin_calib']['extrinsic_T']=[0.,0.,0.]
-    p['preprocess'].update(point_filter_num=1,filter_size_surf=.02,blind=.1)
+    p['preprocess'].update(point_filter_num=1,filter_size_surf=.02,filter_size_map=.02,blind=.1)
     p['imu']['imu_int_frame']=2;p['uav']['gravity_align_en']=False
     p['publish']['pub_plane_en']=False
     p['relocalization'].update(map_voxel_leaf_size=.04,gicp_map_voxel_leaf_size=.04,
@@ -158,6 +160,10 @@ def main():
         if args.inspect_only:return
         rclpy.init();runner=Runner(args.install,directory)
         try:
+            # Distinct planar voxels remain observable while extension updates
+            # them; the former tiny corner straddled voxel boundaries.
+            runner.cloud_points=cluster(0)
+            runner.write_map(runner.map,runner.cloud_points)
             for name,config,prior in zip(names,configs,(False,True)):runtime_check(runner,name,config,prior)
         finally:runner.close();rclpy.shutdown()
     print('PASS 5 combined-launch regression scenarios',flush=True)

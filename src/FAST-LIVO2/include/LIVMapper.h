@@ -185,7 +185,8 @@ public:
   /*『GT』*/
   string odom_frame, sensor_frame, base_frame;
   // bool send_odom_base_tf = false;//是否发布odom到base的tf变换,当前用不上
-  bool locate_in_prior_map = false; 
+  bool locate_in_prior_map = false;
+  bool prior_map_update_en = false;
   /*『GT』*/
   deque<PointCloudXYZI::Ptr> lid_raw_data_buffer;
   deque<double> lid_header_time_buffer;

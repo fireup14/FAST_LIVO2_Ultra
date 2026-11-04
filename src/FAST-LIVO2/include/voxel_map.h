@@ -215,7 +215,8 @@ public:
   geometry_msgs::msg::Quaternion geoQuat_;
 
   int feats_down_size_;
-  int effct_feat_num_;
+  int effct_feat_num_ = 0;
+  bool numerical_failure_ = false;
   std::vector<M3D> cross_mat_list_;
   std::vector<M3D> body_cov_list_;
   std::vector<pointWithVar> pv_list_;

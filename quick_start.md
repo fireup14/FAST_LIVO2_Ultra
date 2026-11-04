@@ -41,16 +41,18 @@ ros2 launch fast_livo collect_prior.launch.py
 
 先验保存为 `/home/fire/Desktop/FAST_LIVO2_Ultra/PCD/priori/map_MMDD_HHMM.pcd`。
 
-## 2. 一键基于先验重定位并保存本次地图
+## 2. 一键基于先验重定位并连续扩图
 
 编辑同一个 YAML；其他参数保留第 1 节设置，仅调整：
 
-| 参数 | 基于先验定位并保存观测 |
+| 参数 | 基于先验扩图并保存观测 |
 | --- | --- |
 | `locate_in_prior_map` | `true` |
 | `prior_map_name` | 选定先验的实际文件名，如 `priori.pcd` |
 | `pcd_save.pcd_save_en` | `true` |
 | `pcd_save.pcd_save_en_relocate` | `true` |
+
+默认 `prior_map_update_en=true`，完成初始化后继续扩图；设为 `false` 则只在固定先验地图中定位。
 
 将选定 PCD 放入 `/home/fire/Desktop/FAST_LIVO2_Ultra/PCD/map`，只改文件名，目录通常不改。其余参数保留工程默认，初始化自动使用先验 map 坐标。采集和定位的重力对齐设置保持一致。
 
@@ -70,8 +72,8 @@ Published /fast_livo2/initial_map_pose after prior-map initialization; the devic
 
 结束时在同一终端按 **Ctrl+C**，等待地图保存完成及全部进程退出。
 
-本次观测保存到 `/home/fire/Desktop/FAST_LIVO2_Ultra/PCD/relocate/map_MMDD_HHMM.pcd`，不更新或自动合并原先验。同一输出目录内，同分钟重启可能覆盖同名文件。
+本次观测保存到 `/home/fire/Desktop/FAST_LIVO2_Ultra/PCD/relocate/map_MMDD_HHMM.pcd`，保存内容仍仅为本次有效观测；原先验文件不覆盖，完整合图使用 `PCD/scripts/merge_maps.py`。同一输出目录内，同分钟重启可能覆盖同名文件。
 
-保存总开关关闭时，两种模式都不写 PCD；先验定位写盘还需要定位保存开关开启。默认在正常退出时保存整图。
+保存总开关关闭时，两种模式都不写 PCD；先验定位写盘还需要定位保存开关开启。默认退出时保存本次观测；可捕获的运行异常也会尽力保存此前有效缓存。
 
-首次实测建议保留原始雷达／IMU 数据与终端日志；一次采图加一次重定位仅代表当前场景主流程通过。大图保存、异常退出和断流的已知风险见 [README 的实测前复核](/home/fire/Desktop/FAST_LIVO2_Ultra/README.md:553)。
+首次实测建议保留原始雷达／IMU 数据与终端日志；一次采图加一次重定位仅代表当前场景主流程通过。大图保存、断流等剩余风险见 [README 的实测前复核](/home/fire/Desktop/FAST_LIVO2_Ultra/README.md:563)。

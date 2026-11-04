@@ -1,8 +1,11 @@
 /**:
   ros__parameters:
-    # false：MID360 + IMU 普通建图；true：先验地图定位。
+    # false：MID360 + IMU 普通建图；true：先验初始化后定位或继续扩图。
     # 建图与重定位共用模式和地图路径；本次重力对齐由 uav.gravity_align_en 控制。
     locate_in_prior_map: true
+    # 仅有先验时生效：false 固定先验定位；true 成功匹配后将新观测加入在线地图。
+    # 代码缺省为 false，保留旧配置行为；本工程显式启用连续扩图，不修改输入 PCD。
+    prior_map_update_en: true
     # 固定读取目录；将选中的先验放入此目录，通常只需修改文件名。
     # 建图与重定位共同读取 prior_map_path / prior_map_name。
     prior_map_path: "/home/fire/Desktop/FAST_LIVO2_Ultra/PCD/map"
@@ -92,6 +95,7 @@
       layer_init_num: [5, 5, 5, 5, 5]
 
     local_map:
+      # 普通建图／先验扩图遵循此项；固定先验定位强制关闭。关闭时内存随扩图增加。
       map_sliding_en: false
       half_map_size: 100
       sliding_thresh: 8.0
@@ -115,7 +119,7 @@
       pose_output_en: false
 
     pcd_save:
-      # interval=-1 时正常退出后写盘；目录必须是绝对路径，程序会自动创建。
+      # interval=-1 时退出写盘；可捕获异常也尽力保存此前有效观测。目录自动创建。
       # 启动时固定 map_MMDD_HHMM 前缀；正数间隔分段追加 _0001 等序号。
       pcd_save_en:            true
       # -1=初始化时随模式选择：无先验为0，有先验为2；也可显式选择0/1/2。

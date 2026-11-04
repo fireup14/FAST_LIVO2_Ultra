@@ -384,6 +384,8 @@ VoxelOctoTree *VoxelOctoTree::Insert(const pointWithVar &pv)
 
 bool VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 {
+  effct_feat_num_ = 0;
+  numerical_failure_ = false;
   cross_mat_list_.clear();
   cross_mat_list_.reserve(feats_down_size_);
   body_cov_list_.clear();
@@ -519,7 +521,7 @@ bool VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     VD(DIM_STATE)
     solution = K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec.block<DIM_STATE, 1>(0, 0) - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
     int minRow, minCol;
-    if (!solution.allFinite()) { state_ = state_propagat; return false; }
+    if (!solution.allFinite()) { numerical_failure_ = true; state_ = state_propagat; return false; }
     state_ += solution;
     auto rot_add = solution.block<3, 1>(0, 0);
     auto t_add = solution.block<3, 1>(3, 0);

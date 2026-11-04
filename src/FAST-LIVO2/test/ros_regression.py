@@ -324,7 +324,7 @@ class Runner:
         process,log=self.start("fast_livo","fastlivo_mapping",parameters)
         self.spin(.5)
         self.check(process.poll() is None,"visual startup accepts Rcl/Pcl and fractional noise")
-        self.check(any(x.node_name=="laserMapping" for x in self.node.get_subscriptions_info_by_topic("/left_camera/image")),"visual startup creates image subscription")
+        self.check(self.until(lambda:any(x.node_name=="laserMapping" for x in self.node.get_subscriptions_info_by_topic("/left_camera/image"))),"visual startup creates image subscription")
         self.stop(process)
         self.check(process.returncode==0,"visual startup SIGINT exits cleanly")
 

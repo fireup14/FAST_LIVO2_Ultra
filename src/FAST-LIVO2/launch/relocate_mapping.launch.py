@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Localize against a prior and save new observations; all operating parameters remain in the shared YAML."""
+"""Localize against or extend a prior, saving this session's observations; configure both in the shared YAML."""
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription

@@ -15,6 +15,7 @@ which is included as part of this source code package.
 #include <cerrno>
 #include <cmath>
 #include <ctime>
+#include <exception>
 #include <filesystem>
 #include <sstream>
 #include <stdexcept>
@@ -80,11 +81,14 @@ LIVMapper::LIVMapper(rclcpp::Node::SharedPtr &node, std::string node_name, const
   initializeMapSession();
   VoxelMapConfig voxel_config;
   loadVoxelConfig(this->node, voxel_config);
-  if (locate_in_prior_map && voxel_config.map_sliding_en)
+  if (locate_in_prior_map && !prior_map_update_en && voxel_config.map_sliding_en)
   {
     RCLCPP_WARN(this->node->get_logger(), "Disabling map sliding in prior-map localization to preserve the fixed prior.");
     voxel_config.map_sliding_en = false;
   }
+  RCLCPP_INFO(this->node->get_logger(), "Mapping mode: %s; map sliding: %s.",
+      !locate_in_prior_map ? "mapping" : prior_map_update_en ? "prior_extension" : "prior_localization",
+      voxel_config.map_sliding_en ? "enabled" : "disabled");
 
   visual_sub_map.reset(new PointCloudXYZI());
   feats_undistort.reset(new PointCloudXYZI());
@@ -209,6 +213,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<std::string>("publish.map_frame_id", "map");
 
   try_declare.template operator()<bool>("locate_in_prior_map", false);//『GT』
+  try_declare.template operator()<bool>("prior_map_update_en", false);
   try_declare.template operator()<string>("prior_map_path", (pcd_root / "map").string());
   try_declare.template operator()<string>("prior_map_name", "");
 
@@ -298,6 +303,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("publish.map_frame_id", map_frame_id_);
 
   this->node->get_parameter("locate_in_prior_map", locate_in_prior_map);//『GT』
+  this->node->get_parameter("prior_map_update_en", prior_map_update_en);
   this->node->get_parameter("prior_map_path", prior_map_path); //『GT』
   node->get_parameter("time_offset.imu_time_offset", imu_time_offset);
   node->get_parameter("imu.b_acc_cov", b_acc_cov);
@@ -907,10 +913,21 @@ void LIVMapper::handleLIO()
     ekf_finish_once = false;
     pcl_w_wait_pub->clear();
     ++unconstrained_frames;
+    const char *mode = !locate_in_prior_map ? "mapping" : prior_map_update_en ? "prior_extension" : "prior_localization";
+    const char *reason = voxelmap_manager->numerical_failure_ ? "non-finite solution" : "insufficient valid constraints";
     RCLCPP_WARN_THROTTLE(this->node->get_logger(), *this->node->get_clock(), 1000,
-        "LIO has insufficient valid constraints; suppressing pose/cloud/state output and map updates.");
+        "LIO state estimation failed (mode=%s, reason=%s, effective_points=%d, minimum=%d, consecutive_failures=%d/%d); suppressing pose/cloud/state output and map updates.",
+        mode, reason, voxelmap_manager->effct_feat_num_, voxelmap_manager->config_setting_.min_effective_points_,
+        unconstrained_frames, max_unconstrained_frames);
     if (locate_in_prior_map && unconstrained_frames >= max_unconstrained_frames)
-      throw std::runtime_error("Prior-map localization lost constraints. Stop, verify the prior/initial pose, and restart mapping and relocalization.");
+    {
+      std::ostringstream message;
+      message << "Prior-map localization lost constraints (mode=" << mode << ", reason=" << reason
+              << ", effective_points=" << voxelmap_manager->effct_feat_num_ << ", consecutive_failures="
+              << unconstrained_frames << "/" << max_unconstrained_frames
+              << "). Stop, verify the prior/initial pose, and restart mapping and relocalization.";
+      throw std::runtime_error(message.str());
+    }
     return;
   }
   unconstrained_frames = 0;
@@ -963,8 +980,6 @@ void LIVMapper::handleLIO()
   //=======================发布里程计与更新体素地图============================//
   euler_cur = RotMtoEuler(_state.rot_end);
   geoQuat = tf::createQuaternionMsgFromRollPitchYaw(euler_cur(0), euler_cur(1), euler_cur(2));//把当前旋转转换为欧拉角，再转换为四元数消息格式。
-  publish_state6(pubState6, _state.rot_end, p_imu->unbiased_gyr);
-  publish_odometry(pubOdomAftMapped);//发布里程计消息，包含当前位姿与速度信息。
 
 
   //=======================再次计时并构建世界系点云（用于体素方差更新）============================//
@@ -984,18 +999,17 @@ void LIVMapper::handleLIO()
 
 
   //=======================体素地图更新与结果发布============================//
-  /*『GT』*/
-  if (!locate_in_prior_map)
+  // Insert the whole downsampled successful scan, including newly seen geometry.
+  // Matching must finish before insertion; failed scans return above.
+  if (!locate_in_prior_map || prior_map_update_en)
   {
-    voxelmap_manager->UpdateVoxelMap(voxelmap_manager->pv_list_);////调用体素地图管理器的 UpdateVoxelMap 方法，使用更新后的点云与协方差信息来更新体素地图。
-    if (log_lio) std::cout << "[ LIO ] Update Voxel Map (mapping mode)" << std::endl;
-}
+    voxelmap_manager->UpdateVoxelMap(voxelmap_manager->pv_list_);
+    if (log_lio) std::cout << "[ LIO ] Update Voxel Map (" << (locate_in_prior_map ? "prior extension" : "mapping") << ")" << std::endl;
+  }
   else
   {
-    // 定位模式下不更新体素地图，仅使用现有体素进行配准
-    if (log_lio) std::cout << "[ LIO ] Locate in prior map (no map update)" << std::endl;
+    if (log_lio) std::cout << "[ LIO ] Locate in fixed prior map (no map update)" << std::endl;
   }
-  /*『GT』*/
 
   _pv_list = voxelmap_manager->pv_list_;//更新当前点云与协方差列表为体素管理器的结果。
   
@@ -1008,6 +1022,9 @@ void LIVMapper::handleLIO()
     voxelmap_manager->mapSliding();//如果启用地图滑动功能，调用 mapSliding 方法进行地图滑动处理。
   }//若启用滑动地图机制，则执行滑动窗口剔除远处体素或维持局部地图大小。
 
+
+  publish_state6(pubState6, _state.rot_end, p_imu->unbiased_gyr);
+  publish_odometry(pubOdomAftMapped);
 
   //==================准备并转换用于发布的完整点云============================//
   PointCloudXYZI::Ptr laserCloudFullRes(dense_map_en ? feats_undistort : feats_down_body);//根据是否启用稠密地图选择使用去畸变特征点云还是下采样点云作为最终的全分辨率点云。
@@ -1072,6 +1089,7 @@ void LIVMapper::writeMapMetadata()
   file << std::setprecision(17) << "coordinate_frame: " << (pcd_save_type==1 ? "per_scan_imu" : pcd_save_type==2 && locate_in_prior_map ? map_frame_id_ : "camera_init") << "\n";
   file << "gravity_align_en: " << (gravity_align_en ? "true" : "false") << "\n";
   file << "localization: " << (locate_in_prior_map ? "true" : "false") << "\n";
+  file << "prior_map_update_en: " << (prior_map_update_en ? "true" : "false") << "\n";
   file << "alignment_ready: " << (initial_alignment_ready ? "true" : "false") << "\n";
   file << "T_map_camera_init: [";
   for (int i=0;i<16;++i) file << (i ? ", " : "") << initial_map_transform_(i/4,i%4);
@@ -1148,6 +1166,7 @@ void LIVMapper::run(rclcpp::Node::SharedPtr &node)
 {
   rclcpp::Rate rate(5000);//设置循环频率为5000Hz
   rclcpp::WallRate initial_pose_wait_rate(100);
+  std::exception_ptr run_error;
   try
   {
     while (rclcpp::ok())
@@ -1198,9 +1217,26 @@ void LIVMapper::run(rclcpp::Node::SharedPtr &node)
   {
     // SIGINT can invalidate the context between ok() and wait-set creation,
     // or during a publisher call. Only shutdown-related ROS errors are benign.
-    if (rclcpp::ok()) throw;
+    if (rclcpp::ok()) run_error = std::current_exception();
   }
-  savePCD();
+  catch (...)
+  {
+    run_error = std::current_exception();
+  }
+  // Save only previously accepted observations, on normal shutdown or a caught
+  // runtime failure. Preserve the original failure even if final saving fails.
+  if (run_error)
+    RCLCPP_WARN(this->node->get_logger(), "Mapping interrupted by an exception; attempting to save valid observations before exiting.");
+  try
+  {
+    savePCD();
+  }
+  catch (const std::exception &error)
+  {
+    RCLCPP_ERROR(this->node->get_logger(), "Final PCD save failed: %s", error.what());
+    if (!run_error) throw;
+  }
+  if (run_error) std::rethrow_exception(run_error);
 }
 
 //prop_imu_once 对给定的状态快照 imu_prop_state 进行一次 IMU 前向传播（单步积分）。
