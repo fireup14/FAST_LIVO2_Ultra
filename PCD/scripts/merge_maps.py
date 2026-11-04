@@ -19,7 +19,7 @@ import tempfile
 # ================= 只需修改这里的文件名 =================
 # 先验输入固定读取 PCD/priori/，relocate 输入固定读取 PCD/relocate/。
 PRIOR_PCD_NAME = "map_1103_2217.pcd"
-RELOCATE_PCD_NAME = "map_1103_2221.pcd"
+RELOCATE_PCD_NAME = "map_1104_1821.pcd"
 
 # 合并结果保存到 PCD/merge/，自动命名为 merged_<先验时间>_<relocate时间>.pcd。
 # 例如 map_1103_2217.pcd + map_1103_2221.pcd → merged_1103_2217_1103_2221.pcd。
