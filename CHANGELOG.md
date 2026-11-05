@@ -11,6 +11,83 @@
 
 ## 2026-11-05
 
+### 自动确定 FAST-LIVO2 包内的 workspace_root
+
+**修改内容**
+
+- 共享 YAML 默认 `workspace_root: "auto"`；未配置时也自动使用本次编译对应的 FAST-LIVO2 源码包目录。
+  继续支持手动绝对目录；空字符串、其他相对路径不接受。
+- FAST-LIVO2 通过 ament CONFIG_EXTRAS 导出编译源码目录，重定位包将它编入配准器；
+  两个节点共用路径解析函数，在初始化时写回实际根目录参数并打印日志。
+- 自动源码目录不存在或不再是包目录时明确提示重编两包或手动指定绝对目录，不搜索其他工作空间。
+- 重定位 launch 对缺失根目录使用 auto；两份 quick start 和 README 更新自动路径、迁移重编及手动拷图说明，
+  原两个一键启动命令和四项任务配置表保持不变。README 同步地图文件名与图像输出目录的当前值。
+- 增补路径解析、两节点参数及组合 launch 回归；不改动算法、地图数据或 Git 忽略规则。
+
+**验证结果**
+
+- 本机 Jazzy 下 fast_livo 与 relocalization 强制重新配置并构建通过；仍有原有 PCL／FLANN 的 CMake 开发警告。
+- 68 项核心配置／保存检查及 110 项扩图核心检查通过，新增覆盖 auto／缺省、源码目录缺失、
+  Desktop／嵌套总工程临时布局、手动绝对目录和空格目录、非法输入及绝对子目录兼容。
+- 14 种真实节点参数场景通过：建图与配准在缺省／auto 时均写回同一个 FAST-LIVO2 源码包目录；
+  手动根目录保留，空值、普通相对目录、~ 和其他字符串均明确拒绝。
+- 两个一键入口的 6 种参数组合、无先验配置拒绝以及 2 种合成运行／SIGINT 保存检查通过；
+  实际运行关闭驱动和 RViz，所有合成地图写入临时目录。
+- 安装的 CMake 导出与配准器编译定义均指向 FAST-LIVO2，而不是重定位包或 install/share；
+  安装 YAML 为 auto，共用头文件已正确安装。
+- 文档 Bash／Python 语法、链接、四项任务表及 git diff --check 通过；本次不改 PCD 数据或 Git 忽略规则。
+- 未进行 git 提交／推送或 RDK 实机运行。板端 Desktop／总工程实际部署仍需在对应位置重新编译验证。
+
+### 将本地 PCD 目录移入 FAST-LIVO2 包
+
+**修改内容**
+
+按用户要求，将 `/home/fire/Desktop/FAST_LIVO2_Ultra/PCD` 整体移动为
+`/home/fire/Desktop/FAST_LIVO2_Ultra/src/FAST-LIVO2/PCD`，包含实际地图、元数据、目录占位文件与合图脚本。
+同一文件系统内直接重命名，不复制大地图，不改写原有文件内容。
+
+- 根 `.gitignore` 增加包内 PCD 路径的忽略／放行规则，保留旧根目录规则兼容已有 RDK checkout。
+- 新增包内 `PCD/.gitignore`，随包复制到总工程后仍可忽略数据，保留占位文件和 scripts 工具。
+- README 与 quick start 更新包目录作为路径根的说明、合图脚本入口；原任务配置表不变。
+- 总工程指南改为说明 PCD 随 FAST-LIVO2 包一起复制，继续兼容 RDK 旧 checkout 根目录遗留的数据。
+  本次不修改已经面向 RDK 总工程的共享 YAML，也不修改算法代码。
+
+**验证结果**
+
+- 移动前后原有 14 个文件的相对路径、设备号、inode、大小和修改时间全部一致；仅新增 PCD/.gitignore。
+- 原 4 个 PCD 数据文件与 3 个元数据文件仍被 Git 忽略；目录占位、合图脚本和包内忽略文件可被追踪。
+- 独立临时仓库核对包内忽略规则，覆盖大小写 PCD、元数据、图像、缓存与工具／占位文件。
+- 合图脚本入口正常，其默认 PCD 根目录指向新位置；文档链接、Bash 语法和 `git diff --check` 通过。
+- 本机原根目录 PCD 已移走；本次未进行 RDK 覆盖、ROS 实机运行或 git 提交／推送。
+
+### 新增 RDK 总工程覆盖编译指南与包内 PCD 路径
+
+**修改文件与内容**
+
+- 新增 `quick_start_whole_prj.md`：提供 RDK 上从 Desktop 工程覆盖到总工程的命令，
+  算法包位于 `ros2_ws/src/functions/relocalization`，驱动位于 `ros2_ws/src/drivers/livox_ros_driver2`；
+  Desktop 根目录中的 PCD 随文档复制步骤归位到目标 `FAST-LIVO2/PCD`，合图脚本一并复制。
+- 修改 `src/FAST-LIVO2/config/mapping_relocation.yaml`：`workspace_root` 改为
+  `/media/mcap_data/project_east_eleair_refactor/ros2_ws/src/functions/relocalization/FAST-LIVO2`，
+  `image_save.output_dir` 改为 `PCD/images`。先验输入及两种保存相对目录仍为
+  `PCD/map`、`PCD/priori`、`PCD/relocate`，解析后均位于 FAST-LIVO2 包内。
+- 文档包含 8 个包的构建命令，使用默认并发、不构建测试目标；说明迁移首次重配置、
+  后续加载新安装空间和仅更新 YAML 时同步 fast_livo 安装配置的方法。
+- 补充覆盖后需核对板端型号／主机 IP、PCD 文件须实际存在以及总工程新位置的 Git 数据忽略规则。
+  本次未修改驱动型号、网络、定位模式或算法参数。
+
+**验证结果与范围**
+
+- YAML 解析后与修改前比较，仅上述两个参数值改变；地图读取、两种地图输出及图像输出均在包内 PCD 下。
+- 新文档 4 段 Bash 命令通过 `bash -n`，本地文档链接有效。
+- 用临时合成文件模拟覆盖并重复执行两次：8 个 ROS 包不重复，驱动位于 drivers，
+  PCD 和脚本复制到 FAST-LIVO2 包内，TEASER++ 的 colcon.pkg 保留，目标额外文件和已有不同名观测保留，源文件不变。
+- 旧布局的分组目录误为 ROS 包时，保护检查会在复制前停止；`git diff --check` 通过。
+- 本机没有 RDK 的 `/media/mcap_data` 挂载点，未实际执行 RDK 的覆盖、编译或运行操作；
+  本机现有 PCD 数据保持原位，目标 PCD 归位由文档中的 RDK 复制步骤执行。未进行 git 提交或推送。
+
+当前共享 YAML 已面向 RDK 总工程；若在 PC 上运行，需将根目录改为 PC 实际数据位置。
+
 ### 补充 PC／RDK 环境与迁移文档（用户确认第 8 项）
 
 **修改范围**

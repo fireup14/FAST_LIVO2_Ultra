@@ -2,7 +2,7 @@
 
 前提：工程已编译，雷达地址为 `192.168.2.3`，主机网卡与所选设备 JSON 中的地址一致，系统时间已同步。默认纯 LIO，无需相机。PC 使用 Ubuntu 24.04／Jazzy、MID360、主机 `192.168.2.50`；RDK 现场使用 Ubuntu 22.04.5／Humble、MID360S、主机 `192.168.2.100`。
 
-移植到其他设备时，在 [mapping_relocation.yaml](/home/fire/Desktop/FAST_LIVO2_Ultra/src/FAST-LIVO2/config/mapping_relocation.yaml) 中只需将 `workspace_root` 改为工程实际绝对路径，例如 RDK 上的 `/home/sunrise/Desktop/FAST_LIVO2_Ultra`。其余地图和图像目录均相对它解析；终端命令中的工程位置也使用实际路径。修改源码 YAML 后按下方构建命令同步安装副本。
+`PCD` 已移入 `src/FAST-LIVO2` 包内。[mapping_relocation.yaml](/home/fire/Desktop/FAST_LIVO2_Ultra/src/FAST-LIVO2/config/mapping_relocation.yaml) 的 `workspace_root` 保持 `"auto"`，自动使用本次编译对应的 FAST-LIVO2 源码包目录；Desktop 和总工程分别在各自位置编译后，不必手动切换根路径。也可填写绝对目录覆盖。地图和图像目录均相对它解析，地图数据须手动复制；启动日志会显示实际根目录。移动源码后重编 `fast_livo` 和 `relocalization`，仅移动 install 不会更新路径。RDK 总工程部署见 [quick_start_whole_prj.md](/home/fire/Desktop/FAST_LIVO2_Ultra/quick_start_whole_prj.md)。修改源码 YAML 后按下方构建命令同步安装副本。
 
 **每个运行终端按所在设备选择一组：**
 
@@ -94,4 +94,4 @@ Published /fast_livo2/initial_map_pose after prior-map initialization; the devic
 
 RDK 历史记录已确认构建和配准收包，先验定位与连续扩图全流程仍待实机验收。RViz 启动 `-11` 尚未修复，可追加 `enable_rviz:=false` 无界面运行；驱动退出 `-11` 暂不处理。
 
-首次实测建议保留原始雷达／IMU 数据与终端日志；一次采图加一次重定位仅代表当前场景主流程通过。大图保存、断流等剩余风险见 [README 的实测前复核](/home/fire/Desktop/FAST_LIVO2_Ultra/README.md:603)。
+首次实测建议保留原始雷达／IMU 数据与终端日志；一次采图加一次重定位仅代表当前场景主流程通过。大图保存、断流等剩余风险见 [README 的实测前复核](/home/fire/Desktop/FAST_LIVO2_Ultra/README.md:608)。

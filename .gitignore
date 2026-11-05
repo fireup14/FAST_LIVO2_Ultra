@@ -2,10 +2,19 @@
 /install/
 /log/
 /logs/
-# Keep PCD folders and tools; ignore generated map data.
+# Legacy root-level PCD data (kept for existing RDK checkouts).
 /PCD/**
 !/PCD/**/
 !/PCD/**/.gitkeep
 !/PCD/scripts/**
 /PCD/**/*.[pP][cC][dD]
 /PCD/**/__pycache__/
+
+# Current PCD directory inside FAST-LIVO2; its own ignore file travels with the package.
+/src/FAST-LIVO2/PCD/**
+!/src/FAST-LIVO2/PCD/**/
+!/src/FAST-LIVO2/PCD/.gitignore
+!/src/FAST-LIVO2/PCD/**/.gitkeep
+!/src/FAST-LIVO2/PCD/scripts/**
+/src/FAST-LIVO2/PCD/**/*.[pP][cC][dD]
+/src/FAST-LIVO2/PCD/**/__pycache__/

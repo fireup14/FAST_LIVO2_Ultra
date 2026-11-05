@@ -1,8 +1,9 @@
 /**:
   ros__parameters:
-    # 所有文件目录的统一根目录；移植到其他电脑／RDK 时只需修改此项。
-    # 以下相对路径均基于它解析，不受终端当前目录影响；也兼容显式绝对路径。
-    workspace_root: "/home/fire/Desktop/FAST_LIVO2_Ultra"
+    # auto：使用本次编译对应的 FAST-LIVO2 源码包目录，PCD 位于该包下。
+    # 复制／移动源码后在目标位置重新编译，无需手动切换 Desktop／总工程路径。
+    # 也可填写绝对目录覆盖；相对目录基于它解析，不受终端当前目录影响。
+    workspace_root: "auto"
 
     # false：MID360 + IMU 普通建图；true：先验初始化后定位或继续扩图。
     # 建图与重定位共用模式和地图路径；本次重力对齐由 uav.gravity_align_en 控制。
@@ -152,7 +153,7 @@
     image_save:
       img_save_en: false
       interval: 1
-      output_dir: "images"
+      output_dir: "PCD/images"
 
     relocalization:
       num_threads: 4

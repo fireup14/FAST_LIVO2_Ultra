@@ -35,7 +35,9 @@ MID360 / MID360S + IMU 的 ROS 2 建图、先验地图定位与连续扩图工�
 
 当前配置为先验模式、`prior_map_update_en=true` 连续扩图、重力对齐开启和观测保存开启。新增开关在 C++ 中缺省为 false，旧配置不增加该项时保持固定先验定位；本工程 YAML 显式启用扩图。参数在启动时读取，更改后重新构建并重启。固定目录分别为 `PCD/priori`（采集输出）、`PCD/relocate`（定位观测输出）、`PCD/map`（先验输入）；通常只修改 `prior_map_name` 选择地图。
 
-`mapping_relocation.yaml` 中的文件目录统一基于 `workspace_root` 解析；迁移到其他电脑或 RDK，只需将它改为工程的实际绝对路径，例如 `/home/sunrise/Desktop/FAST_LIVO2_Ultra`。`PCD/map`、`PCD/priori`、`PCD/relocate` 和 `images` 均为相对目录，不受启动终端当前目录影响。仍兼容显式绝对目录覆盖；`prior_map_name` 继续单独选择文件。
+`PCD` 已放在 `src/FAST-LIVO2` 包内；`mapping_relocation.yaml` 默认 `workspace_root: "auto"`，自动使用本次编译对应的 FAST-LIVO2 源码包目录。Desktop 调试与 RDK 总工程分别在各自位置编译后，无需手动切换根路径；总工程部署见 [quick_start_whole_prj.md](/home/fire/Desktop/FAST_LIVO2_Ultra/quick_start_whole_prj.md)。`PCD/map`、`PCD/priori`、`PCD/relocate` 和 `PCD/images` 均相对它解析，不受终端当前目录或安装目录层级影响。地图文件仍需手动复制，`prior_map_name` 单独选择文件。
+
+建图和配准共用 FAST-LIVO2 导出的编译源码路径，启动日志及节点的 `workspace_root` 参数显示解析后的绝对目录。也可填写绝对 `workspace_root` 或单独的绝对目录覆盖。复制／移动源码后应重编 `fast_livo` 和 `relocalization`；仅移动已编译的 install 不会更新路径。自动根目录不存在时明确报错，不搜索其他工作空间。
 
 ## 2. 获取、依赖与构建
 
@@ -74,7 +76,7 @@ source /home/fire/Desktop/FAST_LIVO2_Ultra/install/setup.bash
 | 项目 | PC 当前配置 | RDK 现场记录 |
 | --- | --- | --- |
 | 系统／ROS | Ubuntu 24.04／Jazzy | Ubuntu 22.04.5／Humble |
-| 工程根目录 | `/home/fire/Desktop/FAST_LIVO2_Ultra` | `/home/sunrise/Desktop/FAST_LIVO2_Ultra` |
+| colcon 工作空间 | `/home/fire/Desktop/FAST_LIVO2_Ultra` | `/home/sunrise/Desktop/FAST_LIVO2_Ultra` |
 | SDK 源码目录 | `/home/fire/third_party/Livox-SDK2` | `/home/sunrise/third_party/Livox-SDK2` |
 | 雷达型号 | MID360 | MID360S |
 | 主机网卡 IP | `192.168.2.50` | `192.168.2.100` |
@@ -82,7 +84,7 @@ source /home/fire/Desktop/FAST_LIVO2_Ultra/install/setup.bash
 
 这些是两台设备的配置实例，IP 须以实际网卡和雷达为准。当前仓库保留 PC 默认值，迁移到 RDK 时核对：
 
-- 算法 YAML 的 `workspace_root` 改为板端实际工程根目录；地图和图像相对目录通常不改。
+- 算法 YAML 的 `workspace_root` 保持 `"auto"`，在板端目标目录重新编译后自动指向该处 FAST-LIVO2 包；地图和图像相对目录通常不改。总工程嵌套部署路径见 quick_start_whole_prj.md。
 - 驱动 `config/msg_MID360.yaml` 的 `lidar_model` 选为 `mid360s`。
 - 驱动 `config/MID360s_config.json` 的 `host_net_info` 中 `host_ip` 与板端网卡一致，记录中的 RDK 为 `192.168.2.100`；雷达 IP 保持与设备实际地址一致。
 
@@ -361,7 +363,7 @@ pcd_save.pcd_save_en && (!locate_in_prior_map || pcd_save.pcd_save_en_relocate)
 
 ### 离线拼接先验与 relocate 地图
 
-脚本：[PCD/scripts/merge_maps.py](/home/fire/Desktop/FAST_LIVO2_Ultra/PCD/scripts/merge_maps.py)。仅需 Python 3，无需启动 ROS。在脚本顶部选择两个文件：
+脚本：[PCD/scripts/merge_maps.py](/home/fire/Desktop/FAST_LIVO2_Ultra/src/FAST-LIVO2/PCD/scripts/merge_maps.py)。仅需 Python 3，无需启动 ROS。在脚本顶部选择两个文件：
 
 ```python
 PRIOR_PCD_NAME = "map_1103_2217.pcd"       # PCD/priori 下的先验文件
@@ -371,7 +373,7 @@ RELOCATE_PCD_NAME = "map_1103_2221.pcd"    # PCD/relocate 下的文件
 然后直接运行，无需传入文件路径：
 
 ```bash
-python3 /home/fire/Desktop/FAST_LIVO2_Ultra/PCD/scripts/merge_maps.py
+python3 /home/fire/Desktop/FAST_LIVO2_Ultra/src/FAST-LIVO2/PCD/scripts/merge_maps.py
 ```
 
 两份输入必须已在同一套坐标基准下；本工程先验定位使用 `pcd_save.type=-1`（初始化解析为 2）时，relocate 文件已满足此条件，不要再套一次地图变换。
@@ -402,7 +404,7 @@ python3 /home/fire/Desktop/FAST_LIVO2_Ultra/PCD/scripts/merge_maps.py
 ros2 launch relocalization relocalization.launch.py algorithm:=sac_ia_icp
 ```
 
-不要再使用已删除的 old/example 启动文件。直接 `ros2 run` 启动配准节点时，须提供当前 `prior_map_path`（绝对目录，或配合绝对 `workspace_root` 使用相对目录）、`prior_map_name`（文件名）和外参参数；配准节点仅用于先验定位，不再读取模式或重力对齐开关，重力对齐仍由建图节点完成。原 `map_path/target_pcd_file` 等分裂接口已被统一。标准点云可在共享 YAML 的 `relocalization.pcl_type` 设为 `standard`，输入 `/pointcloud2`；默认 Livox 输入为原始雷达点，不能用改话题名称把 CustomMsg 当成 PointCloud2，也不要把已经注册到世界系的点云重复当原始雷达云。
+不要再使用已删除的 old/example 启动文件。直接 `ros2 run` 启动配准节点时，须提供当前 `prior_map_path`（绝对目录，或相对 `workspace_root` 的目录）、`prior_map_name`（文件名）和外参参数；`workspace_root` 未配置时同样自动使用 FAST-LIVO2 的编译源码包目录。配准节点仅用于先验定位，不再读取模式或重力对齐开关，重力对齐仍由建图节点完成。原 `map_path/target_pcd_file` 等分裂接口已被统一。标准点云可在共享 YAML 的 `relocalization.pcl_type` 设为 `standard`，输入 `/pointcloud2`；默认 Livox 输入为原始雷达点，不能用改话题名称把 CustomMsg 当成 PointCloud2，也不要把已经注册到世界系的点云重复当原始雷达云。
 
 | 配准参数 | launch 默认值 | 含义 |
 | --- | --- | --- |
@@ -433,11 +435,11 @@ ros2 launch relocalization relocalization.launch.py algorithm:=sac_ia_icp
 
 | 参数 | 当前值 | 含义 |
 | --- | --- | --- |
-| `workspace_root` | `"/home/fire/Desktop/FAST_LIVO2_Ultra"` | YAML 中全部文件目录的统一根目录，必须为非空绝对路径；迁移时只改此项，不支持 `~` 或环境变量替换。未配置时，建图节点使用编译时工作空间目录；旧绝对路径配置仍兼容。 |
+| `workspace_root` | `"auto"` | 未配置或 auto 时使用本次编译对应的 FAST-LIVO2 源码包目录；建图、配准均写回实际绝对路径并打印日志。也接受手动绝对目录；空字符串、其他相对路径、~ 和环境变量替换不支持。移动源码后重编两包，自动源码目录不存在时明确报错。 |
 | `locate_in_prior_map` | `true` | `false`：实时观测初始化建图；`true`：加载先验，通过初值服务重定位后按扩图开关运行。不会自动启动外部配准节点。 |
 | `prior_map_update_en` | `true` | 仅 `locate_in_prior_map=true` 时决定是否将成功扫描加入在线地图；false 为固定先验定位，true 为连续扩图。C++ 缺省 false，本 YAML 显式 true；不覆盖输入 PCD，不改变本次观测保存范围。 |
 | `prior_map_path` | `"PCD/map"` | 相对 workspace_root 的先验输入目录，再与 prior_map_name 拼成完整路径；也兼容绝对目录，建图与配准共用同一根目录。 |
-| `prior_map_name` | `"priori.pcd"` | 先验文件名，不含目录；通常只需修改此项。文件须已放入上述输入目录，建图与配准器共用。 |
+| `prior_map_name` | `"map_1103_2217.pcd"` | 先验文件名，不含目录；通常只需修改此项。文件须已放入上述输入目录，建图与配准器共用。 |
 | `time_check.enabled` | `true` | FAST-LIVO2 启动时只读检查 Linux 系统时钟同步状态。未同步、时钟异常或查询失败时立即打印原因并以错误码 1 退出，不创建输出文件、不订阅传感器或进入建图。关闭时打印“时间校验已关闭”，允许使用未经校验的当前系统时间继续运行。代码默认值也为 `true`。 |
 | `common.img_topic` | `"/camera/camera/color/image_raw"` | 原始 sensor_msgs/Image 话题；仅 img_en=1 时创建订阅。不会启动相机。 |
 | `common.lid_topic` | `"/livox/lidar"` | 雷达输入话题。当前 `lidar_type=1` 时使用 `livox_ros_driver2/msg/CustomMsg`，需要驱动输出类型匹配。 |
@@ -517,7 +519,7 @@ ros2 launch relocalization relocalization.launch.py algorithm:=sac_ia_icp
 | `localization.max_unconstrained_frames` | `5` | 两种有先验模式连续估计失败的帧数上限；达到后尽力保存有效缓存，再保留原错误退出，需要核查并重启。 |
 | `image_save.img_save_en` | `false` | 独立图像保存开关；要求 img_en=1，不依赖 PCD 总开关。 |
 | `image_save.interval` | `1` | 每隔多少次图像／RGB 发布调用保存图像，正整数。 |
-| `image_save.output_dir` | `"images"` | 图像保存目录，相对 workspace_root 解析，也兼容绝对目录；启用时自动创建。 |
+| `image_save.output_dir` | `"PCD/images"` | 图像保存目录，相对 workspace_root 解析，也兼容绝对目录；启用时自动创建。 |
 | `relocalization.num_threads` | `4` | 配准器和 OpenMP 线程数，正整数；默认从 16 收敛为 4。 |
 | `relocalization.max_attempts` | `300` | 真实配准输入帧尝试次数上限，正整数。 |
 | `relocalization.timeout_seconds` | `120.0` | 真实配准计算阶段时间预算，秒；在库调用／回调边界检查。 |
@@ -585,11 +587,14 @@ colcon test --packages-select fast_livo
 colcon test-result --verbose
 python3 /home/fire/Desktop/FAST_LIVO2_Ultra/src/FAST-LIVO2/test/ros_regression.py --install /home/fire/Desktop/FAST_LIVO2_Ultra/install --shutdown-repeats 20
 python3 /home/fire/Desktop/FAST_LIVO2_Ultra/src/FAST-LIVO2/test/bringup_regression.py --install /home/fire/Desktop/FAST_LIVO2_Ultra/install
+python3 /home/fire/Desktop/FAST_LIVO2_Ultra/src/FAST-LIVO2/test/workspace_root_ros_regression.py --install /home/fire/Desktop/FAST_LIVO2_Ultra/install
 python3 /home/fire/Desktop/FAST_LIVO2_Ultra/src/FAST-LIVO2/test/prior_extension_ros_regression.py --install /home/fire/Desktop/FAST_LIVO2_Ultra/install
 MPLBACKEND=Agg python3 /home/fire/Desktop/FAST_LIVO2_Ultra/src/FAST-LIVO2/test/tool_regression.py
 ```
 
 合成 ROS 检查默认使用独立域 179、仅本机发现，不启动雷达或相机，所有测试点云写临时目录。core_regression 与 prior_extension_regression 直接调用实际算法／保存函数；扩图 DDS 脚本使用域 191，验证未知区域扫描与异常退出保图；ROS 脚本运行已安装程序；工具检查使用真实 Open3D 文件读写及受控 TSDF 替身，**不声称已经运行真实 VDBFusion 重建**。
+
+2026-11-05 自动根目录验证：本机 Jazzy 下两包构建通过，68 项核心检查、110 项扩图核心检查、14 种两节点根目录参数场景通过；组合入口覆盖 6 种手动／auto／缺省传参检查、无先验配置拒绝和 2 种合成运行／退出保存。建图与配准的实际参数均自动解析为同一个 FAST-LIVO2 源码包目录，支持带空格的手动目录；临时布局覆盖 Desktop 与嵌套总工程，缺失自动源码目录会拒绝。新增节点参数脚本使用域 185，组合入口使用域 183；未启动硬件、未改写项目地图，RDK 两处实际部署仍需重新编译验证。
 
 2026-11-03 先验专用精简后验证：relocalization 重新编译通过，95 项隔离 ROS 合成检查和 5 项启动入口场景通过。新增覆盖无先验配置拒绝、五个配准入口的有效先验启动、TF 固定订阅及其输入／输出双方晚启动交付；此前 43 项核心函数检查已通过，建图算法代码本轮未修改。初值服务检查覆盖非法位姿拒绝、接受后才创建订阅、重复请求不重复初始化、建图晚启动、响应丢失后的相同请求重试、明确拒绝与超时，以及配准器在先验初始化完成前凭接受响应正常退出。原有重力开／关、普通／先验流程、约束丢失、最终 TF、视觉启动和 JPEG/PNG 解压检查也通过；组合入口实际运行时关闭硬件驱动，验证定位及单次 SIGINT 退出保存，所有地图只写临时目录。
 
